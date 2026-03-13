@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/sh
 
 # Fixup the passwd file, in case we're on OpenShift
 if ! whoami > /dev/null 2>&1; then
@@ -9,129 +9,56 @@ if ! whoami > /dev/null 2>&1; then
   fi
 fi
 
-# usage: file_env VAR [DEFAULT] ie: file_env 'XYZ_DB_PASSWORD' 'example'
-# (will allow for "$XYZ_DB_PASSWORD_FILE" to fill in the value of
-#  "$XYZ_DB_PASSWORD" from a file, for Docker's secrets feature)
-function file_env() {
-	local var="$1"
-	local fileVar="${var}_FILE"
-	local def="${2:-}"
-	if [ "${!var:-}" ] && [ "${!fileVar:-}" ]; then
-		printf >&2 'error: both %s and %s are set (but are exclusive)\n' "$var" "$fileVar"
-		exit 1
-	fi
-	local val="$def"
-	if [ "${!var:-}" ]; then
-		val="${!var}"
-	elif [ "${!fileVar:-}" ] && [ ! -r "${!fileVar}" ]; then
-		printf >&2 'error: %s is set to "%s" but the file does not exist or is not readable\n' \
-			"$fileVar" "${!fileVar}"
-		exit 1
-	elif [ "${!fileVar:-}" ]; then
-		val="$(< "${!fileVar}")"
-	fi
-	export "$var"="$val"
-	unset "$fileVar"
-}
-
-# Set values for config variables that can be passed using secrets
-if [ -n "${PGADMIN_CONFIG_CONFIG_DATABASE_URI_FILE}" ]; then
-  file_env PGADMIN_CONFIG_CONFIG_DATABASE_URI
-fi
-file_env PGADMIN_DEFAULT_PASSWORD
-
-# TO enable custom path for config_distro, pass config distro path via environment variable.
-export CONFIG_DISTRO_FILE_PATH="${PGADMIN_CUSTOM_CONFIG_DISTRO_FILE:-/pgadmin4/config_distro.py}"
 # Populate config_distro.py. This has some default config, as well as anything
 # provided by the user through the PGADMIN_CONFIG_* environment variables.
-# Only update the file on first launch. The empty file is created only in default path during the
+# Only update the file on first launch. The empty file is created during the
 # container build so it can have the required ownership.
-if [ ! -e "${CONFIG_DISTRO_FILE_PATH}" ] || [ "$(wc -m "${CONFIG_DISTRO_FILE_PATH}" 2>/dev/null | awk '{ print $1 }')" = "0" ]; then
-    cat << EOF > "${CONFIG_DISTRO_FILE_PATH}"
+if [ "$(wc -m /pgadmin4/config_distro.py | awk '{ print $1 }')" = "0" ]; then
+    cat << EOF > /pgadmin4/config_distro.py
 CA_FILE = '/etc/ssl/certs/ca-certificates.crt'
 LOG_FILE = '/dev/null'
 HELP_PATH = '../../docs'
 DEFAULT_BINARY_PATHS = {
-        'pg': '/usr/local/pgsql-18',
-        'pg-18': '/usr/local/pgsql-18',
-        'pg-17': '/usr/local/pgsql-17',
+        'pg': '/usr/local/pgsql-16',
         'pg-16': '/usr/local/pgsql-16',
         'pg-15': '/usr/local/pgsql-15',
         'pg-14': '/usr/local/pgsql-14',
-        'pg-13': '/usr/local/pgsql-13'
+        'pg-13': '/usr/local/pgsql-13',
+        'pg-12': '/usr/local/pgsql-12'
 }
 EOF
 
     # This is a bit kludgy, but necessary as the container uses BusyBox/ash as
     # it's shell and not bash which would allow a much cleaner implementation
     for var in $(env | grep "^PGADMIN_CONFIG_" | cut -d "=" -f 1); do
-        # Get the raw value
-        val=$(eval "echo \"\$$var\"")
-        # This normalization step is what makes 'true', 'True'
-        case "$(echo "$val" | tr '[:upper:]' '[:lower:]')" in
-            true)  val="True" ;;
-            false) val="False" ;;
-        esac
-        echo "${var#PGADMIN_CONFIG_} = $val" >> "${CONFIG_DISTRO_FILE_PATH}"
+        # shellcheck disable=SC2086
+        # shellcheck disable=SC2046
+        echo ${var#PGADMIN_CONFIG_} = $(eval "echo \$$var") >> /pgadmin4/config_distro.py
     done
 fi
 
-# Check whether the external configuration database exists if it is being used.
-external_config_db_exists="False"
-if [ -n "${PGADMIN_CONFIG_CONFIG_DATABASE_URI}" ]; then
-     external_config_db_exists=$(cd /pgadmin4/pgadmin/utils && /venv/bin/python3 -c "from check_external_config_db import check_external_config_db; val = check_external_config_db("${PGADMIN_CONFIG_CONFIG_DATABASE_URI}"); print(val)")
-fi
+# DEBUGGING:
+cat /pgadmin4/config_distro.py
 
-# DRY of the code to load the PGADMIN_SERVER_JSON_FILE
-function load_server_json_file() {
-    export PGADMIN_SERVER_JSON_FILE="${PGADMIN_SERVER_JSON_FILE:-/pgadmin4/servers.json}"
 
-    EXTRA_ARGS=""
 
-    if [ "${PGADMIN_REPLACE_SERVERS_ON_STARTUP}" = "True" ]; then
-        EXTRA_ARGS="--replace"
-    fi
 
-    if [ -f "${PGADMIN_SERVER_JSON_FILE}" ]; then
-        # When running in Desktop mode, no user is created
-        # so we have to import servers anonymously
-        if [ "${PGADMIN_CONFIG_SERVER_MODE}" = "False" ]; then
-            /venv/bin/python3 /pgadmin4/setup.py load-servers "${PGADMIN_SERVER_JSON_FILE}" ${EXTRA_ARGS}
-        else
-            /venv/bin/python3 /pgadmin4/setup.py load-servers "${PGADMIN_SERVER_JSON_FILE}" --user "${PGADMIN_DEFAULT_EMAIL}" ${EXTRA_ARGS}
-        fi
-    fi
-}
-
-if [ ! -f /var/lib/pgadmin/pgadmin4.db ] && [ "${external_config_db_exists}" = "False" ]; then
+if [ ! -f /var/lib/pgadmin/pgadmin4.db ]; then
     if [ -z "${PGADMIN_DEFAULT_EMAIL}" ] || { [ -z "${PGADMIN_DEFAULT_PASSWORD}" ] && [ -z "${PGADMIN_DEFAULT_PASSWORD_FILE}" ]; }; then
         echo 'You need to define the PGADMIN_DEFAULT_EMAIL and PGADMIN_DEFAULT_PASSWORD or PGADMIN_DEFAULT_PASSWORD_FILE environment variables.'
         exit 1
     fi
 
-    # Validate PGADMIN_DEFAULT_EMAIL
-    CHECK_EMAIL_DELIVERABILITY="False"
-    if [ -n "${PGADMIN_CONFIG_CHECK_EMAIL_DELIVERABILITY}" ]; then
-        CHECK_EMAIL_DELIVERABILITY=${PGADMIN_CONFIG_CHECK_EMAIL_DELIVERABILITY}
+    if ! echo "${PGADMIN_DEFAULT_EMAIL}" | grep -E "^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$" > /dev/null; then
+        echo "'${PGADMIN_DEFAULT_EMAIL}' does not appear to be a valid email address. Please reset the PGADMIN_DEFAULT_EMAIL environment variable and try again."
+        exit 1
     fi
-    ALLOW_SPECIAL_EMAIL_DOMAINS="[]"
-    if [ -n "${PGADMIN_CONFIG_ALLOW_SPECIAL_EMAIL_DOMAINS}" ]; then
-        ALLOW_SPECIAL_EMAIL_DOMAINS=${PGADMIN_CONFIG_ALLOW_SPECIAL_EMAIL_DOMAINS}
+
+    # Read secret contents
+    if [ -n "${PGADMIN_DEFAULT_PASSWORD_FILE}" ]; then
+        PGADMIN_DEFAULT_PASSWORD=$(cat "${PGADMIN_DEFAULT_PASSWORD_FILE}")
+        export PGADMIN_DEFAULT_PASSWORD
     fi
-    GLOBALLY_DELIVERABLE="True"
-    if [ -n "${PGADMIN_CONFIG_GLOBALLY_DELIVERABLE}" ]; then
-        GLOBALLY_DELIVERABLE=${PGADMIN_CONFIG_GLOBALLY_DELIVERABLE}
-    fi
-     email_config="{'CHECK_EMAIL_DELIVERABILITY': ${CHECK_EMAIL_DELIVERABILITY}, 'ALLOW_SPECIAL_EMAIL_DOMAINS': ${ALLOW_SPECIAL_EMAIL_DOMAINS}, 'GLOBALLY_DELIVERABLE': ${GLOBALLY_DELIVERABLE}}"
-     echo "email config is ${email_config}"
-     is_valid_email=$(cd /pgadmin4/pgadmin/utils && /venv/bin/python3 -c "from validation_utils import validate_email; val = validate_email('${PGADMIN_DEFAULT_EMAIL}', ${email_config}); print(val)")
-     if echo "${is_valid_email}" | grep "False" > /dev/null; then
-         echo "'${PGADMIN_DEFAULT_EMAIL}' does not appear to be a valid email address. Please reset the PGADMIN_DEFAULT_EMAIL environment variable and try again."
-         echo "Validation output: ${is_valid_email}"
-         exit 1
-     fi
-    # Switch back to root directory for further process
-    cd /pgadmin4
 
     # Set the default username and password in a
     # backwards compatible way
@@ -142,13 +69,22 @@ if [ ! -f /var/lib/pgadmin/pgadmin4.db ] && [ "${external_config_db_exists}" = "
     # Importing pgadmin4 (from this script) is enough
     /venv/bin/python3 run_pgadmin.py
 
+    export PGADMIN_SERVER_JSON_FILE="${PGADMIN_SERVER_JSON_FILE:-/pgadmin4/servers.json}"
     export PGADMIN_PREFERENCES_JSON_FILE="${PGADMIN_PREFERENCES_JSON_FILE:-/pgadmin4/preferences.json}"
 
     # Pre-load any required servers
-    load_server_json_file
-
-    # Pre-load any required preferences
+    if [ -f "${PGADMIN_SERVER_JSON_FILE}" ]; then
+        # When running in Desktop mode, no user is created
+        # so we have to import servers anonymously
+        if [ "${PGADMIN_CONFIG_SERVER_MODE}" = "False" ]; then
+            /venv/bin/python3 /pgadmin4/setup.py load-servers "${PGADMIN_SERVER_JSON_FILE}"
+        else
+            /venv/bin/python3 /pgadmin4/setup.py load-servers "${PGADMIN_SERVER_JSON_FILE}" --user "${PGADMIN_DEFAULT_EMAIL}"
+        fi
+    fi
     if [ -f "${PGADMIN_PREFERENCES_JSON_FILE}" ]; then
+        # When running in Desktop mode, no user is created
+        # so we have to import servers anonymously
         if [ "${PGADMIN_CONFIG_SERVER_MODE}" = "False" ]; then
             DESKTOP_USER=$(cd /pgadmin4 && /venv/bin/python3 -c 'import config; print(config.DESKTOP_USER)')
             /venv/bin/python3 /pgadmin4/setup.py set-prefs "${DESKTOP_USER}" --input-file "${PGADMIN_PREFERENCES_JSON_FILE}"
@@ -156,21 +92,7 @@ if [ ! -f /var/lib/pgadmin/pgadmin4.db ] && [ "${external_config_db_exists}" = "
             /venv/bin/python3 /pgadmin4/setup.py set-prefs "${PGADMIN_DEFAULT_EMAIL}" --input-file "${PGADMIN_PREFERENCES_JSON_FILE}"
         fi
     fi
-    # Copy the pgpass file passed using secrets
-    if [ -f "${PGPASS_FILE}" ]; then
-        if [ "${PGADMIN_CONFIG_SERVER_MODE}" = "False" ]; then
-            cp ${PGPASS_FILE} /var/lib/pgadmin/.pgpass
-            chmod 600 /var/lib/pgadmin/.pgpass
-        else
-            PGADMIN_USER_CONFIG_DIR=$(echo "${PGADMIN_DEFAULT_EMAIL}" | sed 's/@/_/g')
-            mkdir -p /var/lib/pgadmin/storage/${PGADMIN_USER_CONFIG_DIR}
-            cp ${PGPASS_FILE} /var/lib/pgadmin/storage/${PGADMIN_USER_CONFIG_DIR}/.pgpass
-            chmod 600 /var/lib/pgadmin/storage/${PGADMIN_USER_CONFIG_DIR}/.pgpass
-        fi
-    fi
-# If already initialised and PGADMIN_REPLACE_SERVERS_ON_STARTUP is set to true, then load the server json file.
-elif [ "${PGADMIN_REPLACE_SERVERS_ON_STARTUP}" = "True" ]; then
-    load_server_json_file
+
 fi
 
 # Start Postfix to handle password resets etc.
@@ -185,18 +107,43 @@ TIMEOUT=$(cd /pgadmin4 && /venv/bin/python3 -c 'import config; print(config.SESS
 # NOTE: currently pgadmin can run only with 1 worker due to sessions implementation
 # Using --threads to have multi-threaded single-process worker
 
+
+export PGADMIN_LISTEN_PORT=8080
+
 if [ -n "${PGADMIN_ENABLE_SOCK}" ]; then
     BIND_ADDRESS="unix:/run/pgadmin/pgadmin.sock"
 else
     if [ -n "${PGADMIN_ENABLE_TLS}" ]; then
         BIND_ADDRESS="${PGADMIN_LISTEN_ADDRESS:-[::]}:${PGADMIN_LISTEN_PORT:-443}"
     else
-        BIND_ADDRESS="${PGADMIN_LISTEN_ADDRESS:-[::]}:${PGADMIN_LISTEN_PORT:-80}"
+        BIND_ADDRESS="${PGADMIN_LISTEN_ADDRESS:-[::]}:${PGADMIN_LISTEN_PORT:-8080}"
     fi
 fi
 
+echo "ENV_VARS:"
+echo "==========================================================================================================="
+env
+echo "==========================================================================================================="
+
+echo "PGADMIN_ENABLE_TLS: $PGADMIN_ENABLE_TLS"
+echo "PGADMIN_LISTEN_ADDRES: $PGADMIN_LISTEN_ADDRESS"
+echo "PGADMIN_LISTEN_PORT: $PGADMIN_LISTEN_PORT"
+echo ""
+echo "GUNICORN_LIMIT_REQUEST_LINE: $GUNICORN_LIMIT_REQUEST_LINE"
+echo "TIMEOUT: $TIMEOUT"
+echo "BIND_ADDRESS: $BIND_ADDRESS"
+echo "GUNICORN_THREADS: $GUNICORN_THREADS"
+echo "GUNICORN_ACCESS_LOGFILE: $GUNICORN_ACCESS_LOGFILE"
+echo "==========================================================================================================="
+
 if [ -n "${PGADMIN_ENABLE_TLS}" ]; then
+    echo "gunicorn command:"
+    echo "exec /venv/bin/gunicorn --limit-request-line "${GUNICORN_LIMIT_REQUEST_LINE:-8190}" --timeout "${TIMEOUT}" --bind "${BIND_ADDRESS}" -w 1 --threads "${GUNICORN_THREADS:-25}" --access-logfile "${GUNICORN_ACCESS_LOGFILE:--}" --keyfile /certs/server.key --certfile /certs/server.cert -c gunicorn_config.py run_pgadmin:app"
+
     exec /venv/bin/gunicorn --limit-request-line "${GUNICORN_LIMIT_REQUEST_LINE:-8190}" --timeout "${TIMEOUT}" --bind "${BIND_ADDRESS}" -w 1 --threads "${GUNICORN_THREADS:-25}" --access-logfile "${GUNICORN_ACCESS_LOGFILE:--}" --keyfile /certs/server.key --certfile /certs/server.cert -c gunicorn_config.py run_pgadmin:app
 else
-    exec /venv/bin/gunicorn --limit-request-line "${GUNICORN_LIMIT_REQUEST_LINE:-8190}" --limit-request-fields "${GUNICORN_LIMIT_REQUEST_FIELDS:-100}" --limit-request-field_size "${GUNICORN_LIMIT_REQUEST_FIELD_SIZE:-8190}" --timeout "${TIMEOUT}" --bind "${BIND_ADDRESS}" -w 1 --threads "${GUNICORN_THREADS:-25}" --access-logfile "${GUNICORN_ACCESS_LOGFILE:--}" -c gunicorn_config.py run_pgadmin:app
+    echo "gunicorn command:"
+    echo "exec /venv/bin/gunicorn --limit-request-line "${GUNICORN_LIMIT_REQUEST_LINE:-8190}" --timeout "${TIMEOUT}" --bind "${BIND_ADDRESS}" -w 1 --threads "${GUNICORN_THREADS:-25}" --access-logfile "${GUNICORN_ACCESS_LOGFILE:--}" -c gunicorn_config.py run_pgadmin:app"
+
+    exec /venv/bin/gunicorn --limit-request-line "${GUNICORN_LIMIT_REQUEST_LINE:-8190}" --timeout "${TIMEOUT}" --bind "${BIND_ADDRESS}" -w 1 --threads "${GUNICORN_THREADS:-25}" --access-logfile "${GUNICORN_ACCESS_LOGFILE:--}" -c gunicorn_config.py run_pgadmin:app
 fi
