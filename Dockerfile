@@ -101,8 +101,6 @@ RUN rm -rf /pgadmin4/docs/en_US/_build && \
 # Create additional builders to get all of the PostgreSQL utilities
 #########################################################################
 
-FROM postgres:12 AS pg12-builder
-FROM postgres:13 AS pg13-builder
 FROM postgres:14 AS pg14-builder
 FROM postgres:15 AS pg15-builder
 FROM postgres:16 AS pg16-builder
@@ -110,15 +108,6 @@ FROM postgres:16 AS pg16-builder
 FROM debian:bullseye-20250407 AS tool-builder
 
 # Copy the PG binaries
-COPY --from=pg12-builder /usr/bin/pg_dump /usr/local/pgsql/pgsql-12/
-COPY --from=pg12-builder /usr/bin/pg_dumpall /usr/local/pgsql/pgsql-12/
-COPY --from=pg12-builder /usr/bin/pg_restore /usr/local/pgsql/pgsql-12/
-COPY --from=pg12-builder /usr/bin/psql /usr/local/pgsql/pgsql-12/
-
-COPY --from=pg13-builder /usr/bin/pg_dump /usr/local/pgsql/pgsql-13/
-COPY --from=pg13-builder /usr/bin/pg_dumpall /usr/local/pgsql/pgsql-13/
-COPY --from=pg13-builder /usr/bin/pg_restore /usr/local/pgsql/pgsql-13/
-COPY --from=pg13-builder /usr/bin/psql /usr/local/pgsql/pgsql-13/
 
 COPY --from=pg14-builder /usr/bin/pg_dump /usr/local/pgsql/pgsql-14/
 COPY --from=pg14-builder /usr/bin/pg_dumpall /usr/local/pgsql/pgsql-14/
@@ -155,18 +144,21 @@ ENV PYTHONPATH=/pgadmin4/
 
 ENV OPENSSL_FORCE_FIPS_MODE=0
 
-RUN apt-get update && \
-    apt-get install -y gnupg curl ca-certificates && \
-    echo "deb http://apt.postgresql.org/pub/repos/apt/ bullseye-pgdg main" > /etc/apt/sources.list.d/pgdg.list && \
-    curl -s https://www.postgresql.org/media/keys/ACCC4CF8.asc | apt-key add - && \
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    ca-certificates \
+    install -d /usr/share/postgresql-common/pgdg && \
+    curl -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc --fail https://www.postgresql.org/media/keys/ACCC4CF8.asc && \
+    echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt bullseye-pgdg main" > /etc/apt/sources.list.d/pgdg.list && \
     apt-get update && \
-    apt-get install -y postgresql-client-15
+    apt-get install -y --no-install-recommends postgresql-client-15 && \
+    rm -rf /var/lib/apt/lists/*
 
 
 # Copy in the tools
 COPY --from=tool-builder /usr/local/pgsql /usr/local/
 
-# Copy in psql libs (best approach):
+# Copy in psql libs:
 RUN set -eux; \
     find /usr/local/pgsql -type f -executable | while read bin; do \
         ldd "$bin" | awk '{print $3}' | grep '^/' | xargs -r cp -v -t /usr/lib/; \
@@ -221,7 +213,15 @@ RUN mkdir -p /run/pgadmin /var/lib/pgadmin && \
     chmod 1777 /run/pgadmin /var/lib/pgadmin && \
     touch /pgadmin4/config_distro.py && \
     chown root:root /pgadmin4/config_distro.py && \
-    chmod 1777 /pgadmin4/config_distro.py
+    chmod 1777 /pgadmin4/config_distro.py && \
+    chmod 0644 /etc/passwd   && \
+    chmod 0600 /etc/passwd-  && \
+    chmod 0644 /etc/group    && \
+    chmod 0600 /etc/group-   && \
+    chmod 0640 /etc/gshadow  && \
+    chmod 0640 /etc/gshadow- && \
+    chmod 0640 /etc/shadow   && \
+    chmod 0600 /etc/shadow-
 
 USER pgadmin
 
