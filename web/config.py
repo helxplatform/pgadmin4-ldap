@@ -137,7 +137,7 @@ X_FRAME_OPTIONS = "SAMEORIGIN"
 # Set to 'unsafe-none', 'same-origin-allow-popups', 'same-origin',
 # or 'noopener-allow-popups'
 
-CROSS_ORIGIN_OPENER_POLICY = "same-origin"
+CROSS_ORIGIN_OPENER_POLICY = "unsafe-none"
 
 
 # The Content-Security-Policy header allows you to restrict how resources
