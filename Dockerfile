@@ -223,7 +223,10 @@ RUN mkdir -p /run/pgadmin /var/lib/pgadmin && \
     chmod 0640 /etc/shadow   && \
     chmod 0600 /etc/shadow-
 
-USER pgadmin
+# No USER directive: HeLx runs this under OpenShift's restricted SCC (arbitrary
+# UID), and start.sh derives identity dynamically (id -u) plus the injected
+# /helx/*.sh overlay. A hardcoded `USER pgadmin` referenced a user that is never
+# created -- ignored in-cluster and breaks plain `docker run`.
 
 VOLUME /var/lib/pgadmin
 EXPOSE 80 443
