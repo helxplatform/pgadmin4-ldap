@@ -11,7 +11,7 @@
 # and clean up the web/ source code
 #########################################################################
 
-FROM debian:bullseye-20250407 AS app-builder
+FROM debian:bookworm AS app-builder
 
 RUN apt-get update && apt-get install -y \
     autoconf \
@@ -48,7 +48,7 @@ RUN yarn set version stable && \
 # Create the base environment for Python
 #########################################################################
 
-FROM debian:bullseye-20250407 AS env-builder
+FROM debian:bookworm AS env-builder
 
 COPY requirements.txt /
 RUN apt-get update && apt-get install -y \
@@ -105,7 +105,7 @@ FROM postgres:14 AS pg14-builder
 FROM postgres:15 AS pg15-builder
 FROM postgres:16 AS pg16-builder
 
-FROM debian:bullseye-20250407 AS tool-builder
+FROM debian:bookworm AS tool-builder
 
 # Copy the PG binaries
 
@@ -129,7 +129,7 @@ COPY --from=pg16-builder /usr/bin/psql /usr/local/pgsql/pgsql-16/
 # Final Container
 #########################################################################
 
-FROM debian:bullseye-20250407
+FROM debian:bookworm
 
 # Environment variables
 ENV PGADMIN_LISTEN_PORT=8080
@@ -149,7 +149,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates && \
     install -d /usr/share/postgresql-common/pgdg && \
     curl -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc --fail https://www.postgresql.org/media/keys/ACCC4CF8.asc && \
-    echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt bullseye-pgdg main" > /etc/apt/sources.list.d/pgdg.list && \
+    echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt bookworm-pgdg main" > /etc/apt/sources.list.d/pgdg.list && \
     apt-get update && \
     apt-get install -y --no-install-recommends postgresql-client-15 && \
     rm -rf /var/lib/apt/lists/*
@@ -190,7 +190,7 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
     less \
     libcap2-bin \
     libjpeg-dev \
-    libnss-ldap \
+    libnss-ldapd \
     lsb-release \
     openssl \
     python3 \
@@ -223,7 +223,10 @@ RUN mkdir -p /run/pgadmin /var/lib/pgadmin && \
     chmod 0640 /etc/shadow   && \
     chmod 0600 /etc/shadow-
 
-USER pgadmin
+# No USER directive: HeLx runs this under OpenShift's restricted SCC (arbitrary
+# UID), and start.sh derives identity dynamically (id -u) plus the injected
+# /helx/*.sh overlay. A hardcoded `USER pgadmin` referenced a user that is never
+# created -- ignored in-cluster and breaks plain `docker run`.
 
 VOLUME /var/lib/pgadmin
 EXPOSE 80 443
