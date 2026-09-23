@@ -190,7 +190,7 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
     less \
     libcap2-bin \
     libjpeg-dev \
-    libnss-ldap \
+    libnss-ldapd \
     lsb-release \
     openssl \
     python3 \
