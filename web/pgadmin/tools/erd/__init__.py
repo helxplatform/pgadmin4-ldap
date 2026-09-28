@@ -20,6 +20,7 @@ from pgadmin.utils import PgAdminModule, \
     SHORTCUT_FIELDS as shortcut_fields
 from pgadmin.utils.ajax import make_json_response, internal_server_error
 from pgadmin.model import Server
+from pgadmin.utils.server_access import get_server
 from config import PG_DEFAULT_DRIVER, ALLOW_SAVE_PASSWORD
 from pgadmin.utils.driver import get_driver
 from pgadmin.browser.utils import underscore_unescape
@@ -31,7 +32,7 @@ from pgadmin.utils.constants import PREF_LABEL_KEYBOARD_SHORTCUTS, \
     PREF_LABEL_OPTIONS
 from .utils import ERDHelper
 from pgadmin.utils.exception import ConnectionLost
-from pgadmin.authenticate import socket_login_required
+from pgadmin.authenticate import socket_permissions_required
 from pgadmin.tools.user_management.PgAdminPermissions import AllPermissionTypes
 from ... import socketio
 
@@ -556,7 +557,7 @@ def panel(trans_id):
     if "linux" in _platform:
         is_linux_platform = True
 
-    s = Server.query.filter_by(id=int(params['sid'])).first()
+    s = get_server(int(params['sid']))
 
     if s:
         params.update({
@@ -584,6 +585,7 @@ def panel(trans_id):
     '/initialize/<int:trans_id>/<int:sgid>/<int:sid>/<int:did>',
     methods=["POST"], endpoint='initialize'
 )
+@permissions_required(AllPermissionTypes.tools_erd_tool)
 @pga_login_required
 def initialize_erd(trans_id, sgid, sid, did):
     """
@@ -658,6 +660,7 @@ def _get_connection(sid, did, trans_id, db_name=None):
 @blueprint.route('/prequisite/<int:trans_id>/<int:sgid>/<int:sid>/<int:did>',
                  methods=["GET"],
                  endpoint='prequisite')
+@permissions_required(AllPermissionTypes.tools_erd_tool)
 @pga_login_required
 def prequisite(trans_id, sgid, sid, did):
     conn = _get_connection(sid, did, trans_id)
@@ -721,6 +724,7 @@ def translate_foreign_keys(tab_fks, tab_data, all_nodes):
 @blueprint.route('/sql/<int:trans_id>/<int:sgid>/<int:sid>/<int:did>',
                  methods=["POST"],
                  endpoint='sql')
+@permissions_required(AllPermissionTypes.tools_erd_tool)
 @pga_login_required
 def sql(trans_id, sgid, sid, did):
     data = json.loads(request.data)
@@ -775,7 +779,7 @@ def connect():
 
 
 @socketio.on('tables', namespace=SOCKETIO_NAMESPACE)
-@socket_login_required
+@socket_permissions_required(AllPermissionTypes.tools_erd_tool)
 def tables(params):
     try:
         helper = ERDHelper(params['trans_id'], params['sid'], params['did'])

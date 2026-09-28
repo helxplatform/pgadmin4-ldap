@@ -9,13 +9,10 @@ CREATE TABLE public."table_with_fk_constraints$%{}[]()&*^!@""'`\/#"
         ON DELETE NO ACTION
         DEFERRABLE
         NOT VALID
-)
-WITH (
-    OIDS = FALSE
 );
 
 ALTER TABLE IF EXISTS public."table_with_fk_constraints$%{}[]()&*^!@""'`\/#"
-    OWNER to postgres;
+    OWNER to <OWNER>;
 
 COMMENT ON TABLE public."table_with_fk_constraints$%{}[]()&*^!@""'`\/#"
     IS 'test comment';

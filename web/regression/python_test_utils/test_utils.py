@@ -563,14 +563,14 @@ def drop_database(connection, database_name):
         if connection.info.server_version >= 90100:
             pg_cursor.execute(
                 "SELECT pg_terminate_backend(pg_stat_activity.pid) "
-                "FROM pg_stat_activity "
+                "FROM pg_catalog.pg_stat_activity "
                 "WHERE pg_stat_activity.datname ='%s' AND "
                 "pid <> pg_backend_pid();" % database_name
             )
         else:
             pg_cursor.execute(
                 "SELECT pg_terminate_backend(procpid) "
-                "FROM pg_stat_activity "
+                "FROM pg_catalog.pg_stat_activity "
                 "WHERE pg_stat_activity.datname ='%s' "
                 "AND current_query='<IDLE>';" % database_name
             )
@@ -597,14 +597,14 @@ def drop_database_multiple(connection, database_names):
             if get_server_version(connection) >= 90100:
                 pg_cursor.execute(
                     "SELECT pg_terminate_backend(pg_stat_activity.pid) "
-                    "FROM pg_stat_activity "
+                    "FROM pg_catalog.pg_stat_activity "
                     "WHERE pg_stat_activity.datname ='%s' AND "
                     "pid <> pg_backend_pid();" % database_name
                 )
             else:
                 pg_cursor.execute(
                     "SELECT pg_terminate_backend(procpid) "
-                    "FROM pg_stat_activity "
+                    "FROM pg_catalog.pg_stat_activity "
                     "WHERE pg_stat_activity.datname ='%s' "
                     "AND current_query='<IDLE>';" % database_name
                 )
@@ -1005,12 +1005,14 @@ def reset_layout_db(user_id=None):
             if user_id is None:
                 cur.execute(
                     'DELETE FROM SETTING WHERE SETTING in '
-                    '("Browser/Layout", "SQLEditor/Layout", "Debugger/Layout")'
+                    '("Browser/Layout", "SQLEditor/Layout", "Debugger/Layout",'
+                    ' "Browser/ObjectExplorerVisible")'
                 )
             else:
                 cur.execute(
                     'DELETE FROM SETTING WHERE SETTING in '
-                    '("Browser/Layout", "SQLEditor/Layout", "Debugger/Layout")'
+                    '("Browser/Layout", "SQLEditor/Layout", "Debugger/Layout",'
+                    ' "Browser/ObjectExplorerVisible")'
                     ' AND USER_ID=?', user_id
                 )
             cur.execute('DELETE FROM process')
@@ -1807,6 +1809,7 @@ def get_test_user(self, user_details,
 
         # Create test_client for this user, and login through it.
         test_client = self.app.test_client()
+        test_client.setApp(self.app)
         user = create_user(user_details)
         if user is not None:
             test_client.test_config_data = dict({
@@ -1907,7 +1910,7 @@ def module_patch(*args):
 
 
 def check_extension_exists(cursor, extension_name):
-    cursor.execute(f"""SELECT COUNT(*) FROM pg_extension
-                   WHERE extname='{extension_name}'""")
+    cursor.execute("""SELECT COUNT(*) FROM pg_catalog.pg_extension
+                   WHERE extname=%s""", (extension_name,))
     res = cursor.fetchone()
     return res

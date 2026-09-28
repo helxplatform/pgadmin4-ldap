@@ -10,7 +10,7 @@ JOIN
 LEFT OUTER JOIN
     pg_catalog.pg_description des ON (des.objoid=pr.oid AND des.classoid='pg_proc'::regclass)
 WHERE
-    proisagg = FALSE
+   pr.prokind IN ('f', 'w')
 {% if fnid %}
     AND pr.oid = {{ fnid|qtLiteral(conn) }}
 {% endif %}
@@ -19,7 +19,7 @@ WHERE
 {% endif %}
 {% if schema_diff %}
     AND CASE WHEN (SELECT COUNT(*) FROM pg_catalog.pg_depend
-        WHERE objid = pr.oid AND deptype = 'e') > 0 THEN FALSE ELSE TRUE END
+        WHERE objid = pr.oid AND deptype IN ('e', 'i')) > 0 THEN FALSE ELSE TRUE END
 {% endif %}
     AND typname NOT IN ('trigger', 'event_trigger')
 ORDER BY

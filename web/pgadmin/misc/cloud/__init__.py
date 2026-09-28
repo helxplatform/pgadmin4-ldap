@@ -19,13 +19,12 @@ from pgadmin.user_login_check import pga_login_required
 from pgadmin.utils import PgAdminModule, html
 from pgadmin.utils.ajax import make_json_response,\
     internal_server_error, bad_request, success_return
+from pgadmin.utils.text_sanitize import sanitize_external_text
 
 from pgadmin.utils.constants import MIMETYPE_APP_JS
 from pgadmin.model import db, Server, Process
 from pgadmin.misc.cloud.utils import get_my_ip
 
-from pgadmin.misc.cloud.biganimal import deploy_on_biganimal,\
-    clear_biganimal_session
 from pgadmin.misc.cloud.rds import deploy_on_rds, clear_aws_session
 from pgadmin.misc.cloud.azure import deploy_on_azure, clear_azure_session
 from pgadmin.misc.cloud.google import clear_google_session, deploy_on_google
@@ -64,9 +63,6 @@ class CloudModule(PgAdminModule):
         super().register(app, options)
 
         from .azure import blueprint as module
-        app.register_blueprint(module)
-
-        from .biganimal import blueprint as module
         app.register_blueprint(module)
 
         from .rds import blueprint as module
@@ -117,8 +113,6 @@ def deploy_on_cloud():
     data = json.loads(request.data)
     if data['cloud'] == 'aws':
         status, p, resp = deploy_on_rds(data)
-    elif data['cloud'] == 'biganimal':
-        status, p, resp = deploy_on_biganimal(data)
     elif data['cloud'] == 'azure':
         status, p, resp = deploy_on_azure(data)
     elif data['cloud'] == 'google':
@@ -131,7 +125,7 @@ def deploy_on_cloud():
         return make_json_response(
             status=410,
             success=0,
-            errormsg=resp
+            errormsg=sanitize_external_text(resp)
         )
 
     # Return response
@@ -180,7 +174,7 @@ def update_server(data):
         db.session.commit()
     except Exception as e:
         db.session.rollback()
-        return False, e.message
+        return False, str(e)
 
     _server = {
         'id': server.id,
@@ -200,7 +194,6 @@ def update_server(data):
 def clear_cloud_session(pid=None):
     """Clear cloud sessions."""
     clear_aws_session()
-    clear_biganimal_session()
     clear_azure_session(pid)
     clear_google_session()
 
@@ -212,8 +205,9 @@ def clear_cloud_session(pid=None):
 @pga_login_required
 def update_cloud_process(sid):
     """Update Cloud Server Process"""
-    _process = Process.query.filter_by(user_id=current_user.id,
-                                       server_id=sid).first()
+    _process = Process.for_user(server_id=sid).first()
+    if _process is None:
+        return success_return()
     _process.acknowledge = None
     db.session.commit()
     return success_return()
@@ -231,7 +225,7 @@ def update_cloud_server():
 
     if not status:
         return make_json_response(
-            status=410, success=0, errormsg=server
+            status=410, success=0, errormsg=sanitize_external_text(server)
         )
 
     return make_json_response(

@@ -12,13 +12,11 @@ CREATE TABLE IF NOT EXISTS public."simple_table_$%{}[]()&*^!@""'`\/#"
     col6 time(5) without time zone,
     CONSTRAINT "simple_table_$%{}[]()&*^!@""'`\/#_pkey" PRIMARY KEY (col1)
 )
-WITH (
-    OIDS = FALSE
-)
+
 TABLESPACE pg_default;
 
 ALTER TABLE IF EXISTS public."simple_table_$%{}[]()&*^!@""'`\/#"
-    OWNER to postgres;
+    OWNER to <OWNER>;
 
 COMMENT ON TABLE public."simple_table_$%{}[]()&*^!@""'`\/#"
     IS 'test comment';

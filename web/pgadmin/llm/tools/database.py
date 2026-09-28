@@ -19,6 +19,7 @@ Uses pgAdmin's SQL template infrastructure for version-aware queries.
 import secrets
 from typing import Optional
 
+import sqlparse
 from flask import render_template
 
 from pgadmin.utils.driver import get_driver
@@ -36,6 +37,34 @@ INDEXES_TEMPLATE_PATH = 'indexes/sql'
 
 # Application name prefix for LLM connections
 LLM_APP_NAME_PREFIX = 'pgAdmin 4 - LLM'
+
+
+# Statement keywords permitted at the start of an LLM-supplied query.
+# The BEGIN TRANSACTION READ ONLY wrapper around the query is only
+# effective if the LLM cannot exit that transaction. A multi-statement
+# payload such as `COMMIT; <write>; SELECT 1` would otherwise terminate
+# the read-only transaction (via COMMIT/END/ROLLBACK/ABORT) and run
+# subsequent statements in autocommit mode.
+#
+# The allowlist below rejects transaction-control statements, SET/RESET,
+# DML/DDL, CALL, COPY, and anything else that could weaken the read-only
+# sandbox, *for queries sqlparse correctly recognises as a single
+# statement*. It is a fast, user-friendly pre-filter, not the boundary
+# enforcement: sqlparse's lexer can disagree with PostgreSQL's own
+# parser about where one statement ends and another begins (e.g. string
+# literal escaping under standard_conforming_strings), so a payload can
+# look like one safe statement to sqlparse while PostgreSQL executes it
+# as several. The actual guarantee that only one statement reaches the
+# server is enforced at the protocol level -- see _execute_readonly_query,
+# which runs the query with prepare=True so PostgreSQL's own Parse step
+# (not a client-side approximation of it) rejects multi-statement text.
+#
+# EXPLAIN ANALYZE on a SELECT remains supported; EXPLAIN ANALYZE on a
+# write statement is blocked by PostgreSQL itself inside the read-only
+# transaction.
+_ALLOWED_LEADING_KEYWORDS = frozenset({
+    'SELECT', 'WITH', 'EXPLAIN', 'SHOW', 'VALUES', 'TABLE',
+})
 
 
 class DatabaseToolError(Exception):
@@ -84,7 +113,9 @@ def _get_connection(sid: int, did: int, conn_id: str):
         )
 
 
-def _connect_readonly(_manager, conn, conn_id: str) -> tuple[bool, str | None]:
+def _connect_readonly(
+    _manager, conn, conn_id: str
+) -> tuple[bool, Optional[str]]:
     """
     Establish a read-only connection.
 
@@ -106,6 +137,24 @@ def _connect_readonly(_manager, conn, conn_id: str) -> tuple[bool, str | None]:
             if not status:
                 return False, msg
 
+        # Force the extended query protocol on this connection,
+        # regardless of the server's configured "Prepare threshold"
+        # (which defaults to blank/None, meaning "never prepare"). The
+        # per-call prepare=True passed to execute_2darray() in
+        # _execute_readonly_query() is silently ignored by psycopg3
+        # whenever conn.prepare_threshold is None -- PrepareManager.get()
+        # checks that before it looks at the prepare argument at all, and
+        # falls back to the simple query protocol, which is exactly the
+        # multi-statement-capable protocol this defense must avoid.
+        # Setting the threshold to 0 ("always prepare") on this
+        # single-use, per-query connection (see conn_id generation in
+        # execute_readonly_query) makes the extended protocol -- and
+        # therefore PostgreSQL's single-statement Parse-step guarantee --
+        # unconditional here, without touching the server-wide setting or
+        # any other connection.
+        if getattr(conn, 'conn', None) is not None:
+            conn.conn.prepare_threshold = 0
+
         # Set application name via SQL - this is thread-safe and doesn't
         # require environment variables. The name will be visible in
         # pg_stat_activity to identify LLM connections.
@@ -119,10 +168,118 @@ def _connect_readonly(_manager, conn, conn_id: str) -> tuple[bool, str | None]:
             # Non-fatal - connection still works without custom app name
             pass
 
+        # Defense-in-depth: make READ ONLY the session default, not just a
+        # property of the transaction started by BEGIN TRANSACTION READ
+        # ONLY. If a statement ever managed to end that transaction early
+        # (e.g. a smuggled COMMIT), the next transaction on this connection
+        # -- implicit or explicit -- would still be read-only rather than
+        # falling back to a writable default.
+        conn.execute_void(
+            "SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY"
+        )
+
         return True, None
 
     except Exception as e:
         return False, str(e)
+
+
+def _first_real_keyword(statement) -> str:
+    """
+    Return the first non-trivial leaf token of a parsed statement.
+
+    Whitespace, comments, and punctuation are skipped so that a leading
+    open-parenthesis (e.g. ``(SELECT 1) UNION (SELECT 2)``) or a leading
+    comment block does not mask the real leading keyword. The result is
+    upper-cased; an empty string is returned for an empty statement.
+    """
+    for tok in statement.flatten():
+        if tok.is_whitespace:
+            continue
+        ttype = str(tok.ttype) if tok.ttype is not None else ''
+        if 'Comment' in ttype or 'Punctuation' in ttype:
+            continue
+        return (tok.normalized or '').upper()
+    return ''
+
+
+def _validate_readonly_query(query: str) -> None:
+    """
+    Reject LLM-supplied queries that are obviously not a single,
+    read-only statement.
+
+    This is a fast pre-filter, not the security boundary: it rejects
+    plainly-disallowed statement types and multi-statement input *as
+    sqlparse's lexer sees it*. sqlparse's notion of where a string
+    literal (and therefore a statement) ends can disagree with
+    PostgreSQL's own parser -- e.g. a backslash before a quote is an
+    escape to sqlparse but an ordinary character to PostgreSQL when
+    standard_conforming_strings is on (the default) -- so a payload can
+    pass this check as a single SELECT while PostgreSQL would actually
+    execute it as several statements, including a COMMIT that ends the
+    read-only transaction. That class of attack is closed at the
+    protocol level, not here: see _execute_readonly_query, which
+    executes the query with prepare=True so PostgreSQL's own Parse step
+    -- the actual authority on statement boundaries -- rejects any text
+    containing more than one statement.
+
+    Validation rules:
+
+    * The input must contain exactly one non-empty statement (as far as
+      sqlparse can tell).
+    * The leading keyword must be in :data:`_ALLOWED_LEADING_KEYWORDS`.
+
+    PostgreSQL is left to enforce the rest -- ``EXPLAIN ANALYZE`` on a
+    write statement, data-modifying CTEs, and volatile function side
+    effects are all rejected at runtime by the read-only transaction.
+
+    Args:
+        query: SQL query supplied by the LLM tool call.
+
+    Raises:
+        DatabaseToolError: If the query is empty, contains more than
+            one statement, or is not a read-only statement.
+    """
+    if not query or not query.strip():
+        raise DatabaseToolError(
+            "Query is empty",
+            code="INVALID_QUERY"
+        )
+
+    try:
+        parsed = sqlparse.parse(query)
+    except Exception as e:
+        raise DatabaseToolError(
+            f"Failed to parse query: {e}",
+            code="INVALID_QUERY"
+        )
+
+    statements = [
+        s for s in parsed
+        if s.token_first(skip_cm=True, skip_ws=True) is not None
+    ]
+
+    if not statements:
+        raise DatabaseToolError(
+            "Query contains no SQL statement",
+            code="INVALID_QUERY"
+        )
+
+    if len(statements) > 1:
+        raise DatabaseToolError(
+            "Only a single SQL statement is allowed; multi-statement "
+            "queries are rejected",
+            code="INVALID_QUERY"
+        )
+
+    keyword = _first_real_keyword(statements[0])
+    if keyword not in _ALLOWED_LEADING_KEYWORDS:
+        raise DatabaseToolError(
+            f"Statement type '{keyword or 'UNKNOWN'}' is not permitted; "
+            "only read-only statements (SELECT, WITH, EXPLAIN, SHOW, "
+            "VALUES, TABLE) are allowed",
+            code="INVALID_QUERY"
+        )
 
 
 def _execute_readonly_query(conn, query: str) -> dict:
@@ -131,6 +288,19 @@ def _execute_readonly_query(conn, query: str) -> dict:
 
     The query is wrapped in a read-only transaction to ensure
     no data modifications can occur.
+
+    The query is executed with prepare=True, and the connection's
+    prepare_threshold is forced to 0 in _connect_readonly(), which
+    together force it through PostgreSQL's extended query protocol.
+    (prepare=True alone is not enough: psycopg3 ignores it whenever
+    prepare_threshold is None -- pgAdmin's blank-by-default server
+    setting -- and falls back to the multi-statement-capable simple
+    query protocol.) The server's Parse step accepts only a single SQL
+    statement in the extended protocol, so this is what actually
+    guarantees the LLM cannot smuggle a second statement (e.g. a COMMIT
+    to end the read-only transaction early) past
+    _validate_readonly_query's sqlparse-based check -- see the note on
+    _validate_readonly_query for why that check alone is not sufficient.
 
     Args:
         conn: Database connection
@@ -156,8 +326,10 @@ def _execute_readonly_query(conn, query: str) -> dict:
             )
 
         try:
-            # Execute the actual query
-            status, result = conn.execute_2darray(query)
+            # Execute the actual query. prepare=True, combined with the
+            # prepare_threshold=0 forced in _connect_readonly(), is
+            # load-bearing -- see the docstring above.
+            status, result = conn.execute_2darray(query, prepare=True)
 
             if not status:
                 raise DatabaseToolError(
@@ -229,9 +401,16 @@ def execute_readonly_query(
         - truncated: True if results were limited
 
     Raises:
-        DatabaseToolError: If the query fails or connection
-            cannot be established
+        DatabaseToolError: If the query is rejected by validation, the
+            query fails at runtime, or a connection cannot be
+            established.
     """
+    # Validate the LLM-supplied query before allocating a connection.
+    # The BEGIN TRANSACTION READ ONLY wrapper below is only effective
+    # if the query is a single read-only statement; see
+    # _validate_readonly_query for the threat model and rules.
+    _validate_readonly_query(query)
+
     # Generate unique connection ID for this LLM query
     conn_id = f"llm_{secrets.choice(range(1, 9999999))}"
 

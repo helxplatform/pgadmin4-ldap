@@ -11,6 +11,25 @@ file (see the :ref:`config.py <config_py>` documentation) on the system where
 pgAdmin is installed in Server mode. You can copy these settings from *config.py*
 file and modify the values for the following parameters.
 
+.. warning::
+   pgAdmin reads OAuth2 provider settings **only** from the ``OAUTH2_CONFIG``
+   list; each provider is a single dictionary entry within that list. Settings
+   such as ``OAUTH2_CLIENT_ID`` or ``OAUTH2_SSL_CERT_VERIFICATION`` defined at
+   the top level of the configuration are ignored.
+
+   This matters in container deployments. Although most options can be set with
+   an individual ``PGADMIN_CONFIG_<KEY>`` environment variable, OAuth2 is the
+   exception: individual variables such as ``PGADMIN_CONFIG_OAUTH2_CLIENT_ID``
+   or ``PGADMIN_CONFIG_OAUTH2_SSL_CERT_VERIFICATION`` will **not** configure a
+   provider. Instead, configure the whole provider list through a single
+   ``PGADMIN_CONFIG_OAUTH2_CONFIG`` variable, for example::
+
+       PGADMIN_CONFIG_OAUTH2_CONFIG="[{'OAUTH2_NAME': 'my-provider', 'OAUTH2_DISPLAY_NAME': 'My Provider', 'OAUTH2_CLIENT_ID': '...', 'OAUTH2_CLIENT_SECRET': '...', 'OAUTH2_SERVER_METADATA_URL': 'https://provider.example.com/.well-known/openid-configuration', 'OAUTH2_SCOPE': 'openid email profile', 'OAUTH2_SSL_CERT_VERIFICATION': False}]"
+
+   If pgAdmin detects per-provider OAuth2 settings at the top level while no
+   provider is configured in ``OAUTH2_CONFIG``, it logs a warning at startup
+   to highlight the misconfiguration.
+
 OAuth2 vs OpenID Connect (OIDC)
 ================================
 
@@ -63,7 +82,7 @@ and secure.
     "OAUTH2_API_BASE_URL", "Oauth2 base URL endpoint to make requests simple, ex: *https://api.github.com/*"
     "OAUTH2_USERINFO_ENDPOINT", "User Endpoint, ex: *user* (for github, or *user/emails* if the user's email address is private) and *userinfo* (for google). **For OIDC providers**, this is optional if the ID token contains sufficient claims (email, preferred_username, or sub)."
     "OAUTH2_SCOPE", "Oauth scope, ex: 'openid email profile'. **For OIDC providers**, include 'openid' scope to receive an ID token."
-    "OAUTH2_ICON", "The Font-awesome icon to be placed on the oauth2 button,  ex: fa-github"
+    "OAUTH2_ICON", "The Font Awesome icon to be placed on the oauth2 button. A brand icon name (e.g. fa-github) uses the brands style by default; to use another style, include the style class explicitly (e.g. 'fas fa-key')."
     "OAUTH2_BUTTON_COLOR", "Oauth2 button color"
     "OAUTH2_USERNAME_CLAIM", "The claim which is used for the username. If the value is empty, **for OIDC providers** pgAdmin will use: 1) email, 2) preferred_username, or 3) sub (in that order). **For OAuth2 providers** without OIDC, email is required. Ex: *oid* (for AzureAD), *email* (for Github), *preferred_username* (for Keycloak)"
     "OAUTH2_AUTO_CREATE_USER", "Set the value to *True* if you want to automatically

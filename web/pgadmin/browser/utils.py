@@ -18,7 +18,7 @@ from flask_babel import gettext
 
 from config import PG_DEFAULT_DRIVER
 from pgadmin.utils.ajax import make_json_response, precondition_required,\
-    internal_server_error
+    internal_server_error, service_unavailable
 from pgadmin.utils.exception import ConnectionLost, SSHTunnelConnectionLost,\
     CryptKeyMissing
 from pgadmin.utils.constants import DATABASE_LAST_SYSTEM_OID
@@ -343,6 +343,12 @@ class NodeView(View, metaclass=type(MethodView)):
         """Build a list of treeview nodes from the child nodes."""
         children = self.get_children_nodes(*args, **kwargs)
 
+        # get_children_nodes may return a Flask Response (e.g. an error
+        # response) instead of a list of nodes. In that case return it as-is
+        # rather than trying to iterate/sort it.
+        if isinstance(children, flask.Response):
+            return children
+
         # Return sorted nodes based on label
         return make_json_response(
             data=sorted(
@@ -433,10 +439,17 @@ class PGChildNodeView(NodeView):
 
         try:
             conn = manager.connection(did=did)
-            if not conn.connected():
+            # Use ping() instead of connected() to detect stale /
+            # half-open TCP connections that were silently dropped while
+            # pgAdmin was idle.  connected() only checks local state and
+            # would miss these, causing the subsequent SQL queries to
+            # hang indefinitely.
+            if not conn.ping():
                 status, msg = conn.connect()
                 if not status:
-                    return internal_server_error(errormsg=msg)
+                    return service_unavailable(
+                        msg, info="CONNECTION_LOST"
+                    )
         except (ConnectionLost, SSHTunnelConnectionLost, CryptKeyMissing):
             raise
         except Exception:
@@ -446,10 +459,18 @@ class PGChildNodeView(NodeView):
                 )
             )
 
+        children = self.get_children_nodes(manager, **kwargs)
+
+        # get_children_nodes may return a Flask Response (e.g. an error
+        # response) instead of a list of nodes. In that case return it as-is
+        # rather than trying to iterate/sort it.
+        if isinstance(children, flask.Response):
+            return children
+
         # Return sorted nodes based on label
         return make_json_response(
             data=sorted(
-                self.get_children_nodes(manager, **kwargs),
+                children,
                 key=lambda c: c['label']
             )
         )

@@ -27,7 +27,7 @@ from flask import current_app, render_template, url_for, make_response, \
     flash, Response, request, redirect, session
 from flask_babel import gettext
 from libgravatar import Gravatar
-from flask_security import current_user
+from flask_security import current_user, permissions_required
 from flask_login.utils import login_url
 from flask_security.changeable import send_password_changed_notice
 from flask_security.decorators import anonymous_user_required
@@ -50,6 +50,8 @@ from pgadmin.utils.ajax import make_json_response, internal_server_error, \
     bad_request
 from pgadmin.utils.csrf import pgCSRFProtect
 from pgadmin.utils.preferences import Preferences
+from pgadmin.tools.user_management.PgAdminPermissions import \
+    AllPermissionTypes
 from pgadmin.browser.register_browser_preferences import \
     register_browser_preferences
 from pgadmin.browser.register_editor_preferences import \
@@ -68,11 +70,31 @@ from pgadmin.authenticate import AuthSourceManager
 from pgadmin.utils.exception import CryptKeyMissing
 
 from pgadmin.user_login_check import pga_login_required
-from flask_security.views import default_render_json
 
 MODULE_NAME = 'browser'
 BROWSER_STATIC = 'browser.static'
 BROWSER_INDEX = 'browser.index'
+
+
+def _first_form_error_message(form, default=None):
+    """Extract the first validator error message from a wtforms form,
+    coerced to a plain str.
+
+    Returns `default` if there are no errors. Babel `LazyString`
+    (`LazyProxy`) instances — emitted by wtforms validators with
+    translatable messages — must be force-resolved before they reach
+    `json.dumps`, which otherwise fails with "Circular reference
+    detected" because `LazyProxy` reports itself as iterable. Use this
+    helper any time you return a form-validation error in a JSON
+    envelope.
+    """
+    for errors in form.errors.values():
+        for error in errors:
+            if error:
+                return str(error)
+    return default
+
+
 PGADMIN_BROWSER = 'pgAdmin.Browser'
 PASS_ERROR_MSG = gettext('Your password has not been changed.')
 SMTP_SOCKET_ERROR = gettext(
@@ -494,6 +516,9 @@ def utils():
     except Exception:
         pg_libpq_version = 0
 
+    # Check if LLM features are enabled (system-level AND provider configured)
+    from pgadmin.llm.utils import is_llm_enabled
+
     for submodule in current_blueprint.submodules:
         snippets.extend(submodule.jssnippets)
 
@@ -538,6 +563,7 @@ def utils():
                 "Administrator") else restricted_shared_storage_list,
             enable_server_passexec_cmd=config.ENABLE_SERVER_PASS_EXEC_CMD,
             max_server_tags_allowed=config.MAX_SERVER_TAGS_ALLOWED,
+            llm_enabled=is_llm_enabled(),
         ), 200)
     response.headers['Content-Type'] = MIMETYPE_APP_JS
     response.headers['Cache-Control'] = NO_CACHE_CONTROL
@@ -867,6 +893,7 @@ if hasattr(config, 'SECURITY_CHANGEABLE') and config.SECURITY_CHANGEABLE:
     @blueprint.route("/change_password", endpoint="change_password",
                      methods=['GET', 'POST'])
     @pgCSRFProtect.exempt
+    @permissions_required(AllPermissionTypes.change_password)
     @pga_login_required
     def change_password():
         """View function which handles a change password request."""
@@ -914,7 +941,8 @@ if hasattr(config, 'SECURITY_CHANGEABLE') and config.SECURITY_CHANGEABLE:
                 elif errormsg is not None:
                     return internal_server_error(errormsg)
             else:
-                return bad_request(list(form.errors.values())[0][0])
+                return bad_request(_first_form_error_message(
+                    form, gettext('Invalid input.')))
 
         return make_json_response(
             success=1,
@@ -1003,8 +1031,16 @@ if hasattr(config, 'SECURITY_RECOVERABLE') and config.SECURITY_RECOVERABLE:
                 do_flash(*get_message('PASSWORD_RESET_REQUEST',
                                       email=form.user.email))
 
-        if request.get_json(silent=True) and not has_error:
-            return default_render_json(form, include_user=False)
+        if request.get_json(silent=True) is not None:
+            # Flask-Security's default_render_json signature changed
+            # (no longer accepts `include_user`); return our standard
+            # JSON envelope.
+            if has_error or form.errors:
+                return bad_request(_first_form_error_message(
+                    form, gettext('Password reset failed.')))
+            return make_json_response(
+                success=1,
+                info=gettext('Password reset instructions sent.'))
 
         for errors in form.errors.values():
             for error in errors:

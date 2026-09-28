@@ -28,15 +28,24 @@ import UtilityView from '../../UtilityView';
 import ToolView, { getToolTabParams } from '../../ToolView';
 import { ApplicationStateProvider, useApplicationState } from '../../../../settings/static/ApplicationStateProvider';
 import { BROWSER_PANELS, WORKSPACES } from '../../../../browser/static/js/constants';
+import pgWindow from 'sources/window';
 
 export function TabTitle({id, closable, defaultInternal}) {
   const layoutDocker = React.useContext(LayoutDockerContext);
   const internal = layoutDocker?.find(id)?.internal ?? defaultInternal;
+  const showServerColorIndicator = usePreferences(
+    (state) => state.getPreferencesForModule('browser')?.show_server_color_indicator ?? false
+  );
   const [attrs, setAttrs] = useState({
     icon: internal.icon,
     title: internal.title,
     tooltip: internal.tooltip ?? internal.title,
+    bgcolor: internal.bgcolor,
+    fgcolor: internal.fgcolor,
   });
+  // Track visibility state to trigger re-renders when tabs switch
+  const [isVisible, setIsVisible] = useState(layoutDocker?.isTabVisible(id) ?? false);
+
   const onContextMenu = useCallback((e)=>{
     const g = layoutDocker.find(id)?.group??'';
     if((layoutDocker.noContextGroups??[]).includes(g)) return;
@@ -45,7 +54,17 @@ export function TabTitle({id, closable, defaultInternal}) {
     layoutDocker.eventBus.fireEvent(LAYOUT_EVENTS.CONTEXT, e, id);
   }, []);
 
+  const onMouseDown = useCallback((e)=>{
+    if(closable && e.button === 1) {
+      e.preventDefault();
+      layoutDocker.close(id);
+    }
+  }, [closable, id, layoutDocker]);
+
   useEffect(()=>{
+    // Initialize visibility immediately once the effect runs and layoutObj is available
+    setIsVisible(layoutDocker?.isTabVisible(id) ?? false);
+
     const deregister = layoutDocker.eventBus.registerListener(LAYOUT_EVENTS.REFRESH_TITLE, (panelId)=>{
       if(panelId == id) {
         const internal = layoutDocker?.find(id)?.internal??{};
@@ -53,18 +72,78 @@ export function TabTitle({id, closable, defaultInternal}) {
           icon: internal.icon,
           title: internal.title,
           tooltip: internal.tooltip ?? internal.title,
+          bgcolor: internal.bgcolor,
+          fgcolor: internal.fgcolor,
         });
         layoutDocker.saveLayout();
       }
     });
 
-    return ()=>deregister?.();
+    // Listen for tab activation to update visibility state
+    // This ensures the color indicator appears/disappears when switching tabs
+    const activeListener = layoutDocker.eventBus.registerListener(LAYOUT_EVENTS.ACTIVE, () => {
+      const visible = layoutDocker?.isTabVisible(id);
+      setIsVisible(visible);
+    });
+
+    // Listen for server color updates
+    // This custom event is triggered specifically when server bgcolor/fgcolor changes
+    const serverColorsUpdatedHandler = (serverId, colorData) => {
+      const panelData = layoutDocker?.find(id);
+      if (!panelData?.internal) {
+        return;
+      }
+
+      const tabServerId = panelData.internal.server_id;
+      if (!tabServerId || tabServerId !== serverId) {
+        return;
+      }
+
+      // Update internal data and attrs with new colors
+      panelData.internal.bgcolor = colorData.bgcolor || null;
+      panelData.internal.fgcolor = colorData.fgcolor || null;
+      if (panelData.metaData?.tabParams) {
+        panelData.metaData.tabParams.bgcolor = colorData.bgcolor || null;
+        panelData.metaData.tabParams.fgcolor = colorData.fgcolor || null;
+      }
+      setAttrs(prev => ({
+        ...prev,
+        bgcolor: colorData.bgcolor || null,
+        fgcolor: colorData.fgcolor || null,
+      }));
+      // Persist the updated colors so they survive reloads
+      layoutDocker.saveLayout();
+    };
+
+    // Listen to the custom server color update event
+    pgWindow.pgAdmin?.Browser?.Events?.on('pgadmin:server:colors:updated', serverColorsUpdatedHandler);
+
+    return ()=>{
+      deregister?.();
+      activeListener?.();
+      pgWindow.pgAdmin?.Browser?.Events?.off('pgadmin:server:colors:updated', serverColorsUpdatedHandler);
+    };
   }, []);
 
   return (
-    <Box display="flex" alignItems="center" title={attrs.tooltip} onContextMenu={onContextMenu} width="100%">
+    <Box display="flex" alignItems="center" title={attrs.tooltip} onContextMenu={onContextMenu} onMouseDown={onMouseDown} width="100%">
       {attrs.icon && <span className={`dock-tab-icon ${attrs.icon}`}></span>}
-      <span style={{textOverflow: 'ellipsis', overflow: 'hidden', whiteSpace: 'nowrap'}} data-visible={layoutDocker.isTabVisible(id)}>{attrs.title}</span>
+      {showServerColorIndicator && attrs.bgcolor && !isVisible && (
+        <Box
+          component="span"
+          sx={{
+            width: '12px',
+            height: '12px',
+            borderRadius: '50%',
+            backgroundColor: attrs.bgcolor,
+            marginLeft: '2px',
+            marginRight: '4px',
+            flexShrink: 0,
+            border: '1px solid rgba(0, 0, 0, 0.1)',
+          }}
+        />
+      )}
+      <span style={{textOverflow: 'ellipsis', overflow: 'hidden', whiteSpace: 'nowrap'}} data-visible={isVisible}>{attrs.title}</span>
       {closable && <PgIconButton title={gettext('Close')} icon={<CloseIcon style={{height: '0.7em'}} />} size="xs" noBorder onClick={()=>{
         layoutDocker.close(id);
       }} style={{margin: '-1px -10px -1px 0'}} />}
@@ -220,6 +299,10 @@ export class LayoutDocker {
   }
 
   loadLayout(savedLayout) {
+    if (!savedLayout) {
+      // No saved layout - DockLayout already initialized with defaultLayout
+      return;
+    }
     try {
       this.layoutObj.loadLayout(JSON.parse(savedLayout));
       this.addMissingDefaultPanels();
@@ -252,6 +335,22 @@ export class LayoutDocker {
     // Only add non-closable tabs (closable tabs may have been intentionally removed)
     const missingNonClosableTabs = missingTabs.filter(tab => !tab.internal?.closable);
 
+    if (missingNonClosableTabs.length === 0) return;
+
+    // Save the active tab IDs for each panel group before adding missing tabs,
+    // so that newly added tabs don't steal focus from the user's current tab.
+    const savedActiveIds = [];
+    const collectActiveIds = (box) => {
+      box.children.forEach((child) => {
+        if (child.children) {
+          collectActiveIds(child);
+        } else if (child.activeId) {
+          savedActiveIds.push(child.activeId);
+        }
+      });
+    };
+    collectActiveIds(this.layoutObj.getLayout().dockbox);
+
     // Add each missing tab next to a sibling from its original panel group
     missingNonClosableTabs.forEach((tab) => {
       const siblingId = this.findSiblingTab(tab.id, flatDefault, flatCurrent);
@@ -269,6 +368,11 @@ export class LayoutDocker {
           ...tab.internal
         }, this.resetToTabPanel, 'middle');
       }
+    });
+
+    // Restore the original active tabs so newly added tabs don't steal focus
+    savedActiveIds.forEach((activeId) => {
+      this.focus(activeId);
     });
   }
 
@@ -341,9 +445,13 @@ export class LayoutDocker {
 
     focusOn && this.focus(focusOn);
     this.saveLayout();
+    // Anything that tracks state alongside the layout, e.g. whether the
+    // Object Explorer is collapsed, needs to know the layout went back to
+    // its defaults.
+    this.eventBus.fireEvent(LAYOUT_EVENTS.RESET);
   }
 
-  static getPanel({icon, title, closable, tooltip, renamable, manualClose, ...attrs}) {
+  static getPanel({icon, title, closable, tooltip, renamable, manualClose, bgcolor, fgcolor, server_id, ...attrs}) {
     const internal = {
       icon: icon,
       title: title,
@@ -351,7 +459,11 @@ export class LayoutDocker {
       closable: _.isUndefined(closable) ? manualClose : closable,
       renamable: renamable,
       manualClose: manualClose,
+      bgcolor: bgcolor,
+      fgcolor: fgcolor,
+      server_id: server_id, // Store server_id to enable color updates when server properties change
     };
+
     return {
       cached: true,
       group: 'default',
@@ -453,7 +565,7 @@ export function getDefaultGroup() {
   };
 }
 
-export default function Layout({groups, noContextGroups, getLayoutInstance, layoutId, savedLayout, resetToTabPanel, enableToolEvents=false, isLayoutVisible=true, ...props}) {
+export default function Layout({groups, noContextGroups, getLayoutInstance, layoutId, savedLayout, resetToTabPanel, enableToolEvents=false, isLayoutVisible=true, className, ...props}) {
   const [[contextPos, contextPanelId, contextExtraMenus], setContextPos] = React.useState([null, null, null]);
   const defaultGroups = React.useMemo(()=>({
     'dialogs': getDialogsGroup(),
@@ -594,7 +706,8 @@ export default function Layout({groups, noContextGroups, getLayoutInstance, layo
   return (
     <ApplicationStateProvider>
       <LayoutDockerContext.Provider value={layoutDockerObj}>
-        <Box height="100%" width="100%" display={isLayoutVisible ? 'initial' : 'none'} >
+        <Box height="100%" width="100%" display={isLayoutVisible ? 'initial' : 'none'}
+          className={className} >
           {useMemo(()=>(<DockLayout
             style={{
               height: '100%',
@@ -642,7 +755,8 @@ Layout.propTypes = {
   savedLayout: PropTypes.string,
   resetToTabPanel: PropTypes.string,
   enableToolEvents: PropTypes.bool,
-  isLayoutVisible: PropTypes.bool
+  isLayoutVisible: PropTypes.bool,
+  className: PropTypes.string
 };
 
 
@@ -657,5 +771,6 @@ export const LAYOUT_EVENTS = {
   CLOSING: 'closing',
   CONTEXT: 'context',
   CHANGE: 'change',
-  REFRESH_TITLE: 'refresh-title'
+  REFRESH_TITLE: 'refresh-title',
+  RESET: 'reset'
 };

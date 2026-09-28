@@ -8,6 +8,7 @@
 ##########################################################################
 
 import config as app_config
+from pgAdmin4 import app
 from pgadmin.utils.route import BaseTestGenerator
 from regression.python_test_utils import test_utils as utils
 from pgadmin.authenticate.registry import AuthSourceRegistry
@@ -122,6 +123,25 @@ class Oauth2LoginMockTestCase(BaseTestGenerator):
         ('OIDC get_user_profile Calls Userinfo', dict(
             oauth2_provider='oidc-basic',
             kind='oidc_get_user_profile_call',
+            profile={},
+            id_token_claims=None,
+        )),
+        # PR 2 — auth_obj data-only refactor coverage.
+        ('Session After Redirect Has Provider Name Not Live Object', dict(
+            oauth2_provider='github',
+            kind='session_state_after_redirect',
+            profile={},
+            id_token_claims=None,
+        )),
+        ('OAuth2 Callback Without Provider State Redirects', dict(
+            oauth2_provider='github',
+            kind='callback_missing_provider_state',
+            profile={},
+            id_token_claims=None,
+        )),
+        ('OAuth2 openid Scope Without Metadata URL Fails Fast', dict(
+            oauth2_provider='oidc-no-metadata',
+            kind='openid_without_metadata_url',
             profile={},
             id_token_claims=None,
         )),
@@ -303,6 +323,12 @@ class Oauth2LoginMockTestCase(BaseTestGenerator):
             self._test_oidc_get_user_profile_calls_userinfo(
                 self.oauth2_provider
             )
+        elif self.kind == 'session_state_after_redirect':
+            self._test_session_state_after_redirect(self.oauth2_provider)
+        elif self.kind == 'callback_missing_provider_state':
+            self._test_oauth2_callback_missing_provider_state()
+        elif self.kind == 'openid_without_metadata_url':
+            self._test_openid_scope_without_metadata_url_fails_fast()
         else:
             self.fail(f'Unknown test kind: {self.kind}')
 
@@ -693,6 +719,138 @@ class Oauth2LoginMockTestCase(BaseTestGenerator):
                           str(cm.exception))
             mock_register.assert_not_called()
 
+    def _test_session_state_after_redirect(self, provider):
+        """After OAuth2 button login redirects, session must hold the
+        provider name only — NOT a live AuthSourceManager instance.
+
+        Positive: session['oauth2_current_client'] == provider.
+        Negative: session['auth_obj'] absent (live object eliminated).
+        """
+        from pgadmin.authenticate.oauth2 import OAuth2Authentication
+
+        def _fake_authenticate(self, _form):
+            self.oauth2_current_client = provider
+            return False, redirect('https://example.com/')
+
+        with patch.object(
+            OAuth2Authentication, 'authenticate', new=_fake_authenticate
+        ):
+            try:
+                self.tester.login(
+                    email=None, password=None,
+                    _follow_redirects=True,
+                    headers=None,
+                    extra_form_data=dict(oauth2_button=provider)
+                )
+            except Exception as e:
+                # External-redirect follow fails in the test client; that's
+                # fine, we only care about server-side session state.
+                self.assertEqual(
+                    'Following external redirects is not supported.',
+                    str(e)
+                )
+
+        with self.tester.session_transaction() as sess:
+            # Negative — live AuthSourceManager must NOT be in session.
+            self.assertNotIn(
+                'auth_obj', sess,
+                "session['auth_obj'] should be absent after the refactor; "
+                "live class instances must not be persisted in the session.")
+            # Positive — minimal state (provider name) IS persisted.
+            self.assertEqual(
+                sess.get('oauth2_current_client'), provider,
+                "Expected session['oauth2_current_client']=%r" % provider)
+
+    def _test_oauth2_callback_missing_provider_state(self):
+        """OAuth2 callback must redirect gracefully when provider state is
+        missing from the session (e.g., session expired between login and
+        callback). Must NOT raise KeyError or 500.
+        """
+        # Ensure the provider state is absent.
+        with self.tester.session_transaction() as sess:
+            sess.pop('oauth2_current_client', None)
+            sess.pop('auth_obj', None)
+
+        # Hit the OAuth2 authorize callback directly.
+        res = self.tester.get('/oauth2/authorize',
+                              follow_redirects=False)
+
+        # Negative — must NOT 500. The callback should redirect (to the
+        # logout/error page) instead of crashing with KeyError.
+        self.assertNotEqual(
+            res.status_code, 500,
+            "Callback must handle missing provider state gracefully, "
+            "not raise (got status %d)" % res.status_code)
+        # Allow a redirect (302) or a 4xx error response — anything except
+        # an unhandled exception.
+        self.assertLess(res.status_code, 500)
+
+    def _test_openid_scope_without_metadata_url_fails_fast(self):
+        """'openid' in OAUTH2_SCOPE without OAUTH2_SERVER_METADATA_URL must
+        fail fast with actionable guidance, before any network round-trip.
+
+        Also covers the whitespace-only metadata URL bypass and proves the
+        check does not false-positive when the metadata URL is set.
+        """
+        app_config.OAUTH2_CONFIG = [{
+            'OAUTH2_NAME': 'oidc-no-metadata',
+            'OAUTH2_DISPLAY_NAME': 'OIDC No Metadata',
+            'OAUTH2_CLIENT_ID': 'testclientid',
+            'OAUTH2_CLIENT_SECRET': 'testclientsec',
+            'OAUTH2_TOKEN_URL': 'https://idp.example/token',
+            'OAUTH2_AUTHORIZATION_URL': 'https://idp.example/auth',
+            'OAUTH2_API_BASE_URL': 'https://idp.example/',
+            'OAUTH2_SCOPE': 'openid email profile',
+            # OAUTH2_SERVER_METADATA_URL deliberately omitted.
+        }]
+
+        with patch('pgadmin.authenticate.oauth2.OAuth.register'):
+            from pgadmin.authenticate.oauth2 import OAuth2Authentication
+            auth = OAuth2Authentication()
+
+        provider_name = 'oidc-no-metadata'
+
+        # The client must never be touched — the pre-flight raises first.
+        client = MagicMock()
+
+        with self.app.test_request_context():
+            # (a) Metadata URL entirely absent -> RuntimeError.
+            provider = {
+                'OAUTH2_SCOPE': 'openid email profile',
+            }
+            with self.assertRaises(RuntimeError) as cm:
+                auth._authorize_access_token(provider_name, provider, client)
+            msg = str(cm.exception)
+            self.assertIn('OAUTH2_SERVER_METADATA_URL', msg)
+            self.assertIn(provider_name, msg)
+
+            # (b) Whitespace-only metadata URL must be treated as missing.
+            provider = {
+                'OAUTH2_SCOPE': 'openid email profile',
+                'OAUTH2_SERVER_METADATA_URL': '   ',
+            }
+            with self.assertRaises(RuntimeError):
+                auth._authorize_access_token(provider_name, provider, client)
+
+            client.authorize_access_token.assert_not_called()
+
+            # (c) No false-positive: metadata URL set -> pre-flight passes
+            # and the call proceeds to the (mocked) client.
+            provider = {
+                'OAUTH2_SCOPE': 'openid email profile',
+                'OAUTH2_SERVER_METADATA_URL':
+                    'https://idp.example/.well-known/openid-configuration',
+            }
+            auth._authorize_access_token(provider_name, provider, client)
+            client.authorize_access_token.assert_called_once()
+
+            # (d) No false-positive: 'openid' absent -> pre-flight skipped
+            # even without a metadata URL.
+            client.reset_mock()
+            provider = {'OAUTH2_SCOPE': 'email profile'}
+            auth._authorize_access_token(provider_name, provider, client)
+            client.authorize_access_token.assert_called_once()
+
     def tearDown(self):
         self.tester.logout()
 
@@ -705,4 +863,5 @@ class Oauth2LoginMockTestCase(BaseTestGenerator):
         cls.tester.logout()
         app_config.AUTHENTICATION_SOURCES = [INTERNAL]
         app_config.PGADMIN_EXTERNAL_AUTH_SOURCE = INTERNAL
+        app.PGADMIN_EXTERNAL_AUTH_SOURCE = INTERNAL
         utils.login_tester_account(cls.tester)

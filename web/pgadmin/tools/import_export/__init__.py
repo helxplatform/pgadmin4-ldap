@@ -23,6 +23,7 @@ from pgadmin.utils.ajax import make_json_response, bad_request, unauthorized
 
 from config import PG_DEFAULT_DRIVER
 from pgadmin.model import Server
+from pgadmin.utils.server_access import get_server
 from pgadmin.utils.constants import SERVER_NOT_FOUND
 from pgadmin.settings import get_setting, store_setting
 from pgadmin.tools.user_management.PgAdminPermissions import AllPermissionTypes
@@ -97,9 +98,7 @@ class IEMessage(IProcessDesc):
 
     def get_server_name(self):
         # Fetch the server details like hostname, port, roles etc
-        s = Server.query.filter_by(
-            id=self.sid, user_id=current_user.id
-        ).first()
+        s = get_server(self.sid)
 
         if s is None:
             return _("Not available")
@@ -259,6 +258,100 @@ def _save_import_export_settings(settings):
     store_setting('import_export_setting', settings)
 
 
+# Whitelisted values for fields raw-interpolated into the \copy
+# template. Defined at module level to avoid rebuilding per request.
+_VALID_FORMATS = frozenset({'csv', 'text', 'binary'})
+_VALID_ON_ERROR = frozenset({'stop', 'ignore'})
+_VALID_LOG_VERBOSITY = frozenset({'default', 'verbose'})
+
+
+def _is_query_parens_balanced(query):
+    """
+    Check that parentheses are balanced in the query, matching the
+    behavior of psql's \\copy (...) parser (strtokx in
+    parse_slash_copy). Returns False if depth goes negative, which
+    would allow breaking out of the \\copy (...) context.
+
+    IMPORTANT: This parser must be at least as restrictive as psql's
+    strtokx in parse_slash_copy. psql only recognizes:
+      - Single-quoted strings ('...' with '' and \\' escaping)
+      - Double-quoted identifiers ("..." with "" escaping)
+      - Parentheses as nesting delimiters
+    It does NOT recognize --, /* */, or $tag$...$tag$. We must not
+    skip content inside those constructs either, or an attacker can
+    hide an unbalanced ) inside them to bypass validation.
+
+    Backslash handling inside single-quoted strings is ambiguous:
+    psql treats \\ as a plain character when
+    standard_conforming_strings=on (the default since PG 9.1, and
+    the default on every PostgreSQL version pgAdmin 4 supports), but
+    as an escape character when scs=off or inside E'...' strings.
+    Silently picking one interpretation can let a crafted query be
+    accepted here while psql parses it differently (e.g. a \\'
+    that we treat as "still inside the string" while psql, under
+    the default scs=on, treats it as the string's closing quote,
+    exposing a real ')' immediately after). Rather than guess the
+    server's scs setting, we reject any query containing a
+    backslash inside a single-quoted string outright.
+    """
+    depth = 0
+    i = 0
+    length = len(query)
+
+    while i < length:
+        ch = query[i]
+
+        # Single-quoted string literal: skip to closing quote.
+        # Handles the '' escape sequence to match psql's strtokx.
+        # A bare backslash is rejected outright (see docstring):
+        # its meaning depends on standard_conforming_strings, which
+        # we cannot reliably know here, so we refuse to guess.
+        if ch == "'":
+            i += 1
+            while i < length:
+                if query[i] == '\\':
+                    return False  # ambiguous escape: reject
+                elif query[i] == "'":
+                    if i + 1 < length and query[i + 1] == "'":
+                        i += 2  # '' escape
+                    else:
+                        break
+                else:
+                    i += 1
+            if i >= length:
+                return False  # Unterminated string literal
+            i += 1
+            continue
+
+        # Double-quoted identifier: skip to closing quote
+        # (handles "" escape sequences — matches strtokx behavior)
+        if ch == '"':
+            i += 1
+            while i < length:
+                if query[i] == '"':
+                    if i + 1 < length and query[i + 1] == '"':
+                        i += 2  # escaped quote
+                    else:
+                        break
+                else:
+                    i += 1
+            if i >= length:
+                return False  # Unterminated identifier
+            i += 1
+            continue
+
+        if ch == '(':
+            depth += 1
+        elif ch == ')':
+            depth -= 1
+            if depth < 0:
+                return False
+
+        i += 1
+
+    return depth >= 0
+
+
 def update_data_for_import_export(data):
     """
     This function will update the data. Remove unwanted keys based on
@@ -266,7 +359,7 @@ def update_data_for_import_export(data):
     """
     keys_not_required_with_query = ['on_error', 'log_verbosity', 'freeze',
                                     'default_string']
-    if 'is_query_export' in data and data['is_query_export']:
+    if data.get('is_query_export') is True:
         for k in keys_not_required_with_query:
             data.pop(k, None)
         data['is_import'] = False
@@ -293,8 +386,7 @@ def create_import_export_job(sid):
         data = json.loads(request.data)
 
     # Fetch the server details like hostname, port, roles etc
-    server = Server.query.filter_by(
-        id=sid).first()
+    server = get_server(sid)
 
     if server is None:
         return bad_request(errormsg=_("Could not find the specified server."))
@@ -341,6 +433,41 @@ def create_import_export_job(sid):
     else:
         return bad_request(errormsg=_('Please specify a valid file.'))
 
+    # Validate fields that are interpolated raw into the \copy template
+    # to prevent metacommand injection via these parameters. Normalize
+    # to lowercase so downstream template equality checks
+    # (e.g. data.format == 'csv') match regardless of input case.
+    fmt = data.get('format', '')
+    if not isinstance(fmt, str):
+        return bad_request(errormsg=_('Format must be a string.'))
+    if fmt.lower() not in _VALID_FORMATS:
+        return bad_request(errormsg=_('Invalid format specified.'))
+    data['format'] = fmt.lower()
+
+    if 'on_error' in data:
+        val = data['on_error']
+        if not isinstance(val, str):
+            return bad_request(
+                errormsg=_('on_error must be a string.')
+            )
+        if val.lower() not in _VALID_ON_ERROR:
+            return bad_request(
+                errormsg=_('Invalid on_error value.')
+            )
+        data['on_error'] = val.lower()
+
+    if 'log_verbosity' in data:
+        val = data['log_verbosity']
+        if not isinstance(val, str):
+            return bad_request(
+                errormsg=_('log_verbosity must be a string.')
+            )
+        if val.lower() not in _VALID_LOG_VERBOSITY:
+            return bad_request(
+                errormsg=_('Invalid log_verbosity value.')
+            )
+        data['log_verbosity'] = val.lower()
+
     # Get required and other columns list
     cols = _get_formatted_column_list(data, 'columns', driver, conn)
     not_null_cols = _get_formatted_column_list(data, NOT_NULL_COLUMNS,
@@ -355,9 +482,34 @@ def create_import_export_job(sid):
     # Remove unwanted keys from data
     update_data_for_import_export(data)
 
-    # Replace "\n" with " " as it is not working on Windows.
-    if 'query' in data:
-        data['query'] = data['query'].replace("\n", " ")
+    # Validate the query when this is a query-based export. The raw
+    # query is interpolated into psql's \copy (...) template, so we
+    # must ensure it cannot break out of that context (CWE-78).
+    if data.get('is_query_export') is True:
+        query = data.get('query')
+        if not isinstance(query, str) or not query.strip():
+            return bad_request(
+                errormsg=_('Query is required for query-based export.')
+            )
+        # Reject null bytes which could cause C-string truncation
+        # mismatch between Python validation and psql execution.
+        if '\x00' in query:
+            return bad_request(
+                errormsg=_('The query contains invalid characters.')
+            )
+        # Replace line breaks with space (required for Windows; also
+        # prevents psql metacommand termination on \r or \n).
+        query = query.replace('\r\n', ' ') \
+            .replace('\r', ' ').replace('\n', ' ')
+        # Validate that parentheses are balanced. An unbalanced ')'
+        # would close the \copy (...) context and allow injection of
+        # arbitrary metacommand syntax (e.g. ") TO PROGRAM 'cmd'"
+        # for RCE).
+        if not _is_query_parens_balanced(query):
+            return bad_request(
+                errormsg=_('The query contains unbalanced parentheses.')
+            )
+        data['query'] = query
 
     # Create the COPY FROM/TO  from template
     temp_path = 'import_export/sql/#{0}#/cmd.sql'.format(manager.version)
@@ -416,6 +568,7 @@ def create_import_export_job(sid):
 
 
 @blueprint.route('/get_settings/', methods=['GET'], endpoint='get_settings')
+@permissions_required(AllPermissionTypes.tools_import_export_data)
 @pga_login_required
 def get_import_export_settings():
     settings = get_setting('import_export_setting', None)
@@ -429,6 +582,7 @@ def get_import_export_settings():
 @blueprint.route(
     '/utility_exists/<int:sid>', endpoint='utility_exists'
 )
+@permissions_required(AllPermissionTypes.tools_import_export_data)
 @pga_login_required
 def check_utility_exists(sid):
     """

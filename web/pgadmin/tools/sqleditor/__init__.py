@@ -46,6 +46,8 @@ from pgadmin.utils import get_storage_directory
 from pgadmin.utils.ajax import make_json_response, bad_request, \
     success_return, internal_server_error, service_unavailable, gone
 from pgadmin.utils.driver import get_driver
+from pgadmin.utils.crypto import encrypt
+from pgadmin.utils.master_password import get_crypt_key
 from pgadmin.utils.exception import ConnectionLost, SSHTunnelConnectionLost, \
     CryptKeyMissing, ObjectGone
 from pgadmin.browser.utils import underscore_escape
@@ -63,6 +65,8 @@ from pgadmin.utils.constants import MIMETYPE_APP_JS, \
     ERROR_FETCHING_DATA, MY_STORAGE, ACCESS_DENIED_MESSAGE, \
     ERROR_MSG_FAIL_TO_PROMOTE_QT
 from pgadmin.model import Server, ServerGroup
+from pgadmin.utils.server_access import get_server, \
+    get_server_groups_for_user, get_user_server_query
 from pgadmin.tools.schema_diff.node_registry import SchemaDiffRegistry
 from pgadmin.settings import get_setting
 from pgadmin.utils.preferences import Preferences
@@ -189,6 +193,7 @@ def index():
     methods=["PUT", "POST"],
     endpoint="initialize_viewdata"
 )
+@permissions_required(AllPermissionTypes.tools_query_tool)
 @pga_login_required
 def initialize_viewdata(trans_id, cmd_type, obj_type, sgid, sid, did, obj_id):
     """
@@ -225,7 +230,12 @@ def initialize_viewdata(trans_id, cmd_type, obj_type, sgid, sid, did, obj_id):
         'password': _data['password'] if 'password' in _data else None
     }
 
-    server = Server.query.filter_by(id=sid).first()
+    server = get_server(sid)
+    if server is None:
+        return make_json_response(
+            status=410, success=0,
+            errormsg=gettext("Could not find the required server.")
+        )
     if kwargs.get('password', None) is None:
         kwargs['encpass'] = server.password
     else:
@@ -312,7 +322,15 @@ def initialize_viewdata(trans_id, cmd_type, obj_type, sgid, sid, did, obj_id):
     if str(trans_id) in sql_grid_data:
         old_trans_obj = pickle.loads(
             sql_grid_data[str(trans_id)]['command_obj'])
-        if old_trans_obj.did == did and old_trans_obj.obj_id == obj_id:
+        # Only restore the filter/sorting when the previously stored object is
+        # a filter-capable (View/Edit Data) command. The same trans_id may
+        # have been used by a non-filter command such as the Query Tool, or by
+        # an incompatible object persisted by an older version - neither
+        # carries the _row_filter/_data_sorting attributes, and blindly
+        # accessing them raises an AttributeError that prevents the tool (and,
+        # in desktop mode, the application) from loading.
+        if isinstance(old_trans_obj, SQLFilter) and \
+                old_trans_obj.did == did and old_trans_obj.obj_id == obj_id:
             command_obj.set_filter(old_trans_obj._row_filter)
             command_obj.set_data_sorting(
                 dict(data_sorting=old_trans_obj._data_sorting), True)
@@ -374,7 +392,7 @@ def panel(trans_id):
     params['bgcolor'] = None
     params['fgcolor'] = None
 
-    s = Server.query.filter_by(id=int(params['sid'])).first()
+    s = get_server(int(params['sid']))
     if s:
         if s.shared and s.user_id != current_user.id:
             # Import here to avoid circular dependency
@@ -512,7 +530,19 @@ def _init_sqleditor(trans_id, connect, sgid, sid, did, dbname=None, **kwargs):
         kwargs.pop('conn_id')
 
     conn_id_ac = str(secrets.choice(range(1, 9999999)))
-    server = Server.query.filter_by(id=sid).first()
+    server = get_server(sid)
+    if server is None:
+        return True, internal_server_error(
+            errormsg=gettext(
+                "Could not find the required server.")
+        ), '', ''
+    if server.shared and server.user_id != current_user.id:
+        # Import here to avoid circular dependency
+        from pgadmin.browser.server_groups.servers import ServerModule
+        shared_server = ServerModule.get_shared_server(server, sgid)
+        if shared_server is not None:
+            server = ServerModule.get_shared_server_properties(server,
+                                                               shared_server)
     manager = get_driver(PG_DEFAULT_DRIVER).connection_manager(sid)
 
     if kwargs.get('password', None) is None:
@@ -620,6 +650,7 @@ def _init_sqleditor(trans_id, connect, sgid, sid, did, dbname=None, **kwargs):
     '<int:sgid>/<int:sid>/<int:did>',
     methods=["POST"], endpoint='update_sqleditor_connection'
 )
+@pga_login_required
 def update_sqleditor_connection(trans_id, sgid, sid, did):
     # Remove transaction Id.
     with sqleditor_close_session_lock:
@@ -691,6 +722,7 @@ def update_sqleditor_connection(trans_id, sgid, sid, did):
 
 
 @blueprint.route('/close/<int:trans_id>', methods=["DELETE"], endpoint='close')
+@pga_login_required
 def close(trans_id):
     """
     This method is used to close the asynchronous connection
@@ -2337,8 +2369,13 @@ def _check_server_connection_status(sgid, sid=None):
         driver = get_driver(PG_DEFAULT_DRIVER)
         from pgadmin.browser.server_groups.servers import \
             server_icon_and_background
-        server = Server.query.filter_by(
-            id=sid).first()
+        server = get_server(sid)
+        if server is None:
+            return make_json_response(
+                status=410, success=0,
+                errormsg=gettext(
+                    "Could not find the required server.")
+            )
 
         manager = driver.connection_manager(server.id)
         conn = manager.connection()
@@ -2355,6 +2392,8 @@ def _check_server_connection_status(sgid, sid=None):
             }
         )
 
+    except (ConnectionLost, SSHTunnelConnectionLost, CryptKeyMissing):
+        raise
     except Exception as e:
         current_app.logger.exception(e)
         return make_json_response(
@@ -2386,18 +2425,17 @@ def get_new_connection_data(sgid=None, sid=None):
         driver = get_driver(PG_DEFAULT_DRIVER)
         from pgadmin.browser.server_groups.servers import \
             server_icon_and_background
-        server_groups = ServerGroup.query.all()
+        server_groups = get_server_groups_for_user()
         server_group_data = {server_group.name: [] for server_group in
                              server_groups}
-        servers = Server.query.filter(
-            or_(Server.user_id == current_user.id, Server.shared),
+        servers = get_user_server_query().filter(
             Server.is_adhoc == 0)
 
         for server in servers:
             manager = driver.connection_manager(server.id)
             conn = manager.connection()
             connected = conn.connected()
-            server_group_data[server.servers.name].append({
+            server_group_data[server.servergroup.name].append({
                 'label': server.name,
                 "value": server.id,
                 'image': server_icon_and_background(connected, manager,
@@ -2422,6 +2460,8 @@ def get_new_connection_data(sgid=None, sid=None):
             }
         )
 
+    except (ConnectionLost, SSHTunnelConnectionLost, CryptKeyMissing):
+        raise
     except Exception as e:
         current_app.logger.exception(e)
         return make_json_response(
@@ -2496,6 +2536,8 @@ def get_new_connection_database(sgid, sid=None):
                     }
                 }
             )
+    except (ConnectionLost, SSHTunnelConnectionLost, CryptKeyMissing):
+        raise
     except Exception as e:
         current_app.logger.exception(e)
         return make_json_response(
@@ -2562,6 +2604,8 @@ def get_new_connection_user(sgid, sid=None):
                     }
                 }
             )
+    except (ConnectionLost, SSHTunnelConnectionLost, CryptKeyMissing):
+        raise
     except Exception as e:
         current_app.logger.exception(e)
         return make_json_response(
@@ -2626,6 +2670,8 @@ def get_new_connection_role(sgid, sid=None):
                     }
                 }
             )
+    except (ConnectionLost, SSHTunnelConnectionLost, CryptKeyMissing):
+        raise
     except Exception as e:
         current_app.logger.exception(e)
         return make_json_response(
@@ -2647,12 +2693,27 @@ def get_new_connection_role(sgid, sid=None):
 @pga_login_required
 def connect_server(sid):
     # Check if server is already connected then no need to reconnect again.
-    server = Server.query.filter_by(id=sid).first()
+    server = get_server(sid)
+    if server is None:
+        return make_json_response(
+            status=410, success=0,
+            errormsg=gettext("Could not find the required server.")
+        )
     driver = get_driver(PG_DEFAULT_DRIVER)
     manager = driver.connection_manager(sid)
 
     conn = manager.connection()
     if conn.connected():
+        # The server's primary connection is already established.  However,
+        # individual tools (Query Tool, View/Edit Data, etc.) open their own
+        # connections and, when the password is not saved, rely on the
+        # password cached on the server manager.  If that cached password is
+        # missing (e.g. it was never persisted, or the tab was restored from
+        # a workspace) the tool prompts for the password.  Make sure the
+        # password the user just entered at that prompt is cached here so the
+        # tool's connection can use it, instead of being discarded and
+        # re-prompted in a loop.
+        _cache_manager_password_from_request(manager)
         return make_json_response(
             success=1,
             info=gettext("Server connected."),
@@ -2663,6 +2724,43 @@ def connect_server(sid):
     return view.connect(
         server.servergroup_id, sid
     )
+
+
+def _cache_manager_password_from_request(manager):
+    """
+    Cache the password supplied with the current request (from a tool's
+    password prompt) onto the server manager, so that connections opened by
+    tools such as the Query Tool can reuse it without prompting again.
+
+    This is a no-op when no password is supplied or when the encryption key
+    is unavailable.  When a password is supplied it overwrites any cached
+    password, so a freshly entered credential (e.g. a regenerated, short-lived
+    cloud auth token) takes effect immediately.
+
+    This is best-effort: any failure (including malformed request data) is
+    logged and swallowed so it never turns the caller's "Server connected"
+    response into a 500 error.
+    """
+    try:
+        if request.form:
+            data = request.form
+        elif request.data:
+            data = json.loads(request.data)
+        else:
+            return
+
+        password = data.get('password', None)
+        if not password:
+            return
+
+        crypt_key_present, crypt_key = get_crypt_key()
+        if not crypt_key_present:
+            return
+
+        manager._update_password(encrypt(password, crypt_key))
+        manager.update_session()
+    except Exception as e:
+        current_app.logger.exception(e)
 
 
 @blueprint.route(
@@ -2842,7 +2940,7 @@ def nlq_chat_stream(trans_id):
     """
     from flask import stream_with_context
     from pgadmin.llm.utils import is_llm_enabled
-    from pgadmin.llm.chat import chat_with_database
+    from pgadmin.llm.chat import chat_with_database_stream
     from pgadmin.llm.prompts.nlq import NLQ_SYSTEM_PROMPT
 
     # Check if LLM is configured
@@ -2875,6 +2973,7 @@ def nlq_chat_stream(trans_id):
     data = request.get_json(silent=True) or {}
     user_message = data.get('message', '').strip()
     conversation_id = data.get('conversation_id')
+    history_data = data.get('history', [])
 
     if not user_message:
         return make_json_response(
@@ -2885,6 +2984,7 @@ def nlq_chat_stream(trans_id):
     def generate():
         """Generator for SSE events."""
         import secrets as py_secrets
+        from pgadmin.llm.models import Message, Role
 
         try:
             # Send thinking status
@@ -2893,74 +2993,73 @@ def nlq_chat_stream(trans_id):
                 'message': gettext('Analyzing your request...')
             })
 
-            # Call the LLM with database tools
-            response_text, _ = chat_with_database(
+            # Deserialize conversation history if provided
+            conversation_history = None
+            if history_data:
+                conversation_history = []
+                for item in (history_data or []):
+                    if not isinstance(item, dict):
+                        continue
+                    role_str = item.get('role', '')
+                    content = item.get('content', '')
+                    try:
+                        role = Role(role_str)
+                    except ValueError:
+                        continue
+                    conversation_history.append(
+                        Message(role=role, content=content)
+                    )
+
+            # Stream the LLM response with database tools
+            response_text = ''
+            updated_messages = []
+            for item in chat_with_database_stream(
                 user_message=user_message,
                 sid=trans_obj.sid,
                 did=trans_obj.did,
-                system_prompt=NLQ_SYSTEM_PROMPT
-            )
-
-            # Try to parse the response as JSON
-            sql = None
-            explanation = ''
-
-            # First, try to extract JSON from markdown code blocks
-            json_text = response_text.strip()
-
-            # Look for ```json ... ``` blocks
-            json_match = re.search(
-                r'```json\s*\n?(.*?)\n?```',
-                json_text,
-                re.DOTALL
-            )
-            if json_match:
-                json_text = json_match.group(1).strip()
-            else:
-                # Also try to find a plain JSON object in the response
-                # Look for {"sql": ... } pattern anywhere in the text
-                sql_pattern = (
-                    r'\{["\']?sql["\']?\s*:\s*'
-                    r'(?:null|"[^"]*"|\'[^\']*\').*?\}'
-                )
-                plain_json_match = re.search(sql_pattern, json_text, re.DOTALL)
-                if plain_json_match:
-                    json_text = plain_json_match.group(0)
-
-            try:
-                result = json.loads(json_text)
-                sql = result.get('sql')
-                explanation = result.get('explanation', '')
-            except (json.JSONDecodeError, TypeError):
-                # If not valid JSON, try to extract SQL from the response
-                # Look for SQL code blocks first
-                sql_match = re.search(
-                    r'```sql\s*\n?(.*?)\n?```',
-                    response_text,
-                    re.DOTALL
-                )
-                if sql_match:
-                    sql = sql_match.group(1).strip()
-                else:
-                    # Check for malformed tool call text patterns
-                    # Some models output tool calls as text instead of
-                    # proper tool use blocks
-                    tool_call_match = re.search(
-                        r'<function=execute_sql_query>\s*'
-                        r'<parameter=query>\s*(.*?)\s*</parameter>',
-                        response_text,
-                        re.DOTALL
-                    )
-                    if tool_call_match:
-                        sql = tool_call_match.group(1).strip()
-                        explanation = gettext(
-                            'Generated SQL query from your request.'
+                system_prompt=NLQ_SYSTEM_PROMPT,
+                conversation_history=conversation_history
+            ):
+                if isinstance(item, str):
+                    # Text chunk from streaming LLM response
+                    yield _nlq_sse_event({
+                        'type': 'text_delta',
+                        'content': item
+                    })
+                elif isinstance(item, tuple) and \
+                        item[0] == 'tool_use':
+                    # Tool execution in progress - reset streaming
+                    yield _nlq_sse_event({
+                        'type': 'thinking',
+                        'message': gettext(
+                            'Querying the database...'
                         )
-                    else:
-                        # No parseable JSON or SQL block found
-                        # Treat the response as an explanation/error message
-                        explanation = response_text.strip()
-                        # Don't set sql - leave it as None
+                    })
+                elif isinstance(item, tuple) and \
+                        item[0] == 'complete':
+                    # Final result: ('complete', response_text, messages)
+                    response_text = item[1]
+                    updated_messages = item[2]
+
+            # Extract SQL from markdown code fences
+            sql_blocks = re.findall(
+                r'```(?:sql|pgsql|postgresql)\s*\n(.*?)```',
+                response_text,
+                re.DOTALL | re.IGNORECASE
+            )
+            sql = ';\n\n'.join(
+                block.strip().rstrip(';') for block in sql_blocks
+            ) if sql_blocks else None
+
+            # Fallback: try JSON format in case LLM ignored
+            # the markdown instruction
+            if sql is None:
+                try:
+                    result = json.loads(response_text.strip())
+                    if isinstance(result, dict):
+                        sql = result.get('sql')
+                except (json.JSONDecodeError, TypeError):
+                    pass
 
             # Generate a conversation ID if not provided
             if not conversation_id:
@@ -2968,12 +3067,29 @@ def nlq_chat_stream(trans_id):
             else:
                 new_conversation_id = conversation_id
 
-            # Send the final result
+            # Serialize the conversation history so the client can
+            # round-trip it on follow-up turns. Only keep user
+            # messages and final assistant responses (no tool calls).
+            history = []
+            for m in updated_messages:
+                if m.role == Role.USER:
+                    history.append({
+                        'role': m.role.value,
+                        'content': m.content,
+                    })
+                elif m.role == Role.ASSISTANT and not m.tool_calls:
+                    history.append({
+                        'role': m.role.value,
+                        'content': m.content,
+                    })
+
+            # Send the final result with full response content
             yield _nlq_sse_event({
                 'type': 'complete',
                 'sql': sql,
-                'explanation': explanation,
-                'conversation_id': new_conversation_id
+                'content': response_text,
+                'conversation_id': new_conversation_id,
+                'history': history
             })
 
         except Exception as e:

@@ -25,7 +25,6 @@ import {
   drawSelection,
   dropCursor,
   rectangularSelection,
-  crosshairCursor,
   highlightActiveLine,
   EditorView,
   keymap,
@@ -119,9 +118,13 @@ function insertTabWithUnit({ state, dispatch }) {
 /* React wrapper for CodeMirror */
 const defaultExtensions = [
   highlightSpecialChars(),
-  rectangularSelection(),
   dropCursor(),
-  crosshairCursor(),
+  // rectangularSelection() restores the default Alt+drag block (column)
+  // selection. crosshairCursor is intentionally not used: it displayed a
+  // crosshair cursor whenever Alt was held - including for the Alt+F5 run
+  // shortcut (#9570). Omitting it keeps that fix while restoring the block
+  // selection that was lost. #9864 #10029
+  rectangularSelection(),
   EditorState.allowMultipleSelections.of(true),
   indentOnInput(),
   syntaxHighlighting,

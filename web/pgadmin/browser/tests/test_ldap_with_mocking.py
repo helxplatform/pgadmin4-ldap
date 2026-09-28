@@ -8,6 +8,7 @@
 ##########################################################################
 
 import config as app_config
+from pgAdmin4 import app
 from pgadmin.utils.route import BaseTestGenerator
 from regression.python_test_utils import test_utils as utils
 from regression.test_setup import config_data
@@ -67,8 +68,13 @@ class LDAPLoginMockTestCase(BaseTestGenerator):
         """This function checks ldap login functionality."""
         AuthSourceRegistry._registry[LDAP].dedicated_user = False
         res = self.tester.login(self.username, self.password, True)
-        respdata = 'Gravatar image for %s' % self.username
-        self.assertTrue(respdata in res.data.decode('utf8'))
+        # The "Gravatar image for X" HTML is no longer server-rendered
+        # in the React SPA. Verify successful login via session state.
+        self.assertEqual(res.status_code, 200)
+        with self.tester.session_transaction() as sess:
+            self.assertIsNotNone(
+                sess.get('_user_id'),
+                'Post-login session should contain _user_id')
 
     def tearDown(self):
         self.tester.logout()
@@ -82,4 +88,5 @@ class LDAPLoginMockTestCase(BaseTestGenerator):
         cls.tester.logout()
         app_config.AUTHENTICATION_SOURCES = [INTERNAL]
         app_config.PGADMIN_EXTERNAL_AUTH_SOURCE = INTERNAL
+        app.PGADMIN_EXTERNAL_AUTH_SOURCE = INTERNAL
         utils.login_tester_account(cls.tester)

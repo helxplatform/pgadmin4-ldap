@@ -82,6 +82,40 @@ def socket_login_required(f):
     return wrapped
 
 
+def socket_permissions_required(*fsperms):
+    """Socket.IO equivalent of flask_security's permissions_required.
+
+    Refuses the event unless the current user is authenticated and holds
+    all of the named pgAdmin permissions (via their roles). This mirrors
+    the HTTP @permissions_required decorator so that Socket.IO handlers
+    enforce the same tool-level RBAC as the routes: an authenticated user
+    must not be able to reach a sensitive handler (e.g. the schema diff
+    comparison or the PSQL pseudo-terminal) for a tool whose permission
+    they have been denied.
+
+    has_permission() is used in preference to flask_principal's
+    Permission().can() because it reads the user's roles directly and
+    does not depend on the principal identity having been loaded onto the
+    socket request context; it also honours pgAdmin's Administrator
+    bypass (see CustomUserMixin).
+    """
+    def wrapper(f):
+        @functools.wraps(f)
+        def wrapped(*args, **kwargs):
+            if not current_user.is_authenticated:
+                disconnect()
+                raise ConnectionRefusedError("Unauthorised !")
+
+            for fsperm in fsperms:
+                if not current_user.has_permission(fsperm):
+                    disconnect()
+                    raise ConnectionRefusedError("Forbidden !")
+
+            return f(*args, **kwargs)
+        return wrapped
+    return wrapper
+
+
 class AuthenticateModule(pga_utils.PgAdminModule):
     def get_exposed_url_endpoints(self):
         return ['authenticate.login']
@@ -110,7 +144,10 @@ def _login():
         # Sending empty form as oauth2 does not require form attribute
         auth_obj = AuthSourceManager({}, copy.deepcopy(
             config.AUTHENTICATION_SOURCES))
-        session['auth_obj'] = auth_obj
+        # Persist only the OAuth2 provider selection across the redirect.
+        # The auth-source instance lives on current_app's registry so we
+        # re-look-up rather than persist a live class instance in session.
+        session['oauth2_current_client'] = request.form.get('oauth2_button')
     else:
         auth_obj = AuthSourceManager(form, copy.deepcopy(
             config.AUTHENTICATION_SOURCES))
@@ -183,16 +220,14 @@ def _login():
             user.login_attempts = 0
         db.session.commit()
 
-        if 'auth_obj' in session:
-            session.pop('auth_obj')
+        session.pop('oauth2_current_client', None)
         return redirect(pga_utils.get_safe_post_login_redirect())
 
     elif isinstance(msg, Response):
         return msg
     elif 'oauth2_button' in request.form and not isinstance(msg, str):
         return msg
-    if 'auth_obj' in session:
-        session.pop('auth_obj')
+    session.pop('oauth2_current_client', None)
     flash(msg, MessageType.ERROR)
     form_class = _security.forms.get('login_form').cls
     form = form_class()

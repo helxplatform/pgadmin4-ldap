@@ -469,9 +469,16 @@ def create_backup_objects_job(sid):
     try:
         bfile = data['file'].encode('utf-8') \
             if hasattr(data['file'], 'encode') else data['file']
+        # Pass the target database via the PGDATABASE environment variable
+        # instead of as a command-line argument. A positional dbname is unsafe
+        # even with a "--" end-of-options marker: pg_dump/libpq expand a value
+        # containing "=" (e.g. "host=evil port=5433 dbname=postgres") into a
+        # connection string, letting a user redirect the connection -- and the
+        # exported PGPASSWORD credential -- to an arbitrary server. PGDATABASE
+        # is used as a literal database name and is not expanded.
+        env = {}
         if backup_obj_type == 'objects':
-            args.append(data['database'])
-            escaped_args.append(data['database'])
+            env['PGDATABASE'] = data['database']
             p = BatchProcess(
                 desc=BackupMessage(
                     BACKUP.OBJECT, server.id, bfile,
@@ -491,7 +498,7 @@ def create_backup_objects_job(sid):
                 cmd=utility, args=escaped_args, manager_obj=manager
             )
 
-        p.set_env_variables(server)
+        p.set_env_variables(server, env=env)
         p.start()
         jid = p.id
     except Exception as e:
@@ -511,6 +518,7 @@ def create_backup_objects_job(sid):
 @blueprint.route(
     '/utility_exists/<int:sid>/<backup_obj_type>', endpoint='utility_exists'
 )
+@permissions_required(AllPermissionTypes.tools_backup)
 @pga_login_required
 def check_utility_exists(sid, backup_obj_type):
     """
@@ -553,6 +561,7 @@ def check_utility_exists(sid, backup_obj_type):
 @blueprint.route(
     '/objects/<int:sid>/<int:did>/<int:scid>', endpoint='schema_objects'
 )
+@permissions_required(AllPermissionTypes.tools_backup)
 @pga_login_required
 def objects(sid, did, scid=None):
     """

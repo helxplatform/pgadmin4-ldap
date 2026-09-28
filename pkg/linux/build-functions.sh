@@ -68,17 +68,74 @@ _create_python_virtualenv() {
     mkdir -p "usr/${APP_NAME}"
     cd "usr/${APP_NAME}" || exit
 
-    # Create the blank venv
-    "${SYSTEM_PYTHON_PATH}" -m venv --system-site-packages venv
+    # Capture the system site-packages dirs *before* creating the venv -
+    # we need OS-provided packages not available as clean pip wheels on
+    # every target platform (e.g. dbus-python: needs libdbus-1-dev to
+    # build from source, no reliable prebuilt wheel, but is a hard
+    # runtime dependency - see pkg/debian/build.sh's python3-dbus dep).
+    SYSTEM_SITE_DIRS=$("${SYSTEM_PYTHON_PATH}" -c \
+        "import site; print('\n'.join(site.getsitepackages()))")
+
+    # Create the blank venv WITHOUT --system-site-packages. That flag
+    # uses Python's site.addsitedir() under the hood, which doesn't just
+    # add the directory to sys.path - it also scans it for every *.pth
+    # file and executes any "import ..." lines found inside them. A
+    # stale, improperly-uninstalled package's namespace-package .pth
+    # hook (legacy pip/setuptools mechanism) left in the system
+    # site-packages runs arbitrary code at interpreter startup, before
+    # core stdlib is guaranteed to resolve. A leftover
+    # sphinxcontrib-jsmath nspkg.pth on the el-10 build node corrupted
+    # sys.path early enough to break pip's own subprocess bootstrap,
+    # failing the whole build with a misleading "No module named
+    # 'importlib'"/"'traceback'" error (pgadmin4-rpm-build #176/#177).
+    #
+    # We can't just delete that file - it's in a root-owned system
+    # directory on a build node shared by other jobs, and the build
+    # user isn't guaranteed to have write access there (confirmed: our
+    # first attempt at deleting it silently no-opped on el-10).
+    #
+    # Instead, get the same "OS-provided packages are importable" result
+    # via a mechanism that doesn't trigger a .pth scan: a *plain path
+    # line* (no "import") in a .pth file only appends that directory to
+    # sys.path - it does NOT recursively scan it for further .pth files.
+    # Write the system site-packages dirs as plain lines into a .pth
+    # file inside the venv's own site-packages (which we do own), added
+    # once pip/wheel are installed below.
+    "${SYSTEM_PYTHON_PATH}" -m venv venv
     # shellcheck disable=SC1091
     . venv/bin/activate
+
+    VENV_SITE_PACKAGES=$(python3 -c \
+        "import sysconfig; print(sysconfig.get_path('purelib'))")
+    echo "${SYSTEM_SITE_DIRS}" > \
+        "${VENV_SITE_PACKAGES}/system-site-packages.pth"
 
     # Make sure we have the wheel package present, as well as the latest pip
     pip3 install --upgrade pip
     pip3 install wheel
 
-    # Install the requirements
-    pip3 install --force-reinstall --no-cache-dir --no-binary psycopg -r "${SOURCEDIR}/requirements.txt"
+    # Install the requirements.
+    #
+    # psycopg is built from source against the system libpq (see
+    # --no-binary psycopg). Pin the C extension to the x86-64 v1
+    # baseline so the resulting .so runs on every x86_64 CPU we
+    # claim to support. Without this, gcc on a modern build host
+    # may emit AVX2/BMI2/FMA instructions that SIGILL on older
+    # CPUs (Ivy Bridge and earlier) and on default Proxmox kvm64
+    # VMs at psycopg_c.pq module-load time. Issue #9935.
+    #
+    # The flags are scoped to this pip invocation so they don't
+    # leak into any other build steps in the same shell. Other
+    # arches build with their distro defaults.
+    if [ "$(uname -m)" = "x86_64" ]; then
+        CFLAGS="${CFLAGS:-} -O2 -march=x86-64 -mtune=generic" \
+        CXXFLAGS="${CXXFLAGS:-} -O2 -march=x86-64 -mtune=generic" \
+            pip3 install --force-reinstall --no-cache-dir \
+                --no-binary psycopg -r "${SOURCEDIR}/requirements.txt"
+    else
+        pip3 install --force-reinstall --no-cache-dir \
+            --no-binary psycopg -r "${SOURCEDIR}/requirements.txt"
+    fi
 
     # Fixup the paths in the venv activation scripts
     sed -i 's/VIRTUAL_ENV=.*/VIRTUAL_ENV="\/usr\/pgadmin4\/venv"/g' venv/bin/activate
@@ -145,7 +202,16 @@ _build_runtime() {
       ELECTRON_ARCH="arm64"
     fi
 
-    ELECTRON_VERSION="$(npm info electron version)"
+    # Resolve the electron version from runtime/package.json, NOT from
+    # `npm info electron version`. The latter fetches whatever currently
+    # carries the `latest` dist-tag on the npm registry, which means any
+    # newly published electron release lands in shipped binaries without
+    # review. Keep the build deterministic and pinned.
+    ELECTRON_VERSION=$(sed -nE 's/.*"electron":[[:space:]]*"\^?([0-9.]+)".*/\1/p' "${SOURCEDIR}/runtime/package.json" | head -1)
+    if [ -z "${ELECTRON_VERSION}" ]; then
+        echo "ERROR: could not resolve electron version from runtime/package.json" >&2
+        exit 1
+    fi
 
     pushd "${BUILDROOT}" > /dev/null || exit
         while true;do
@@ -180,8 +246,12 @@ _build_runtime() {
 
     # Install the runtime node_modules
     pushd "${BUNDLEDIR}/resources/app" > /dev/null || exit
-        yarn set version berry
-        yarn set version 4
+        YARN_VERSION=$(node -p "require('./package.json').packageManager.split('@')[1]")
+        if [ -z "${YARN_VERSION}" ]; then
+            echo "ERROR: Could not determine Yarn version from package.json packageManager field."
+            exit 1
+        fi
+        yarn set version "${YARN_VERSION}"
         yarn workspaces focus --production
 
         # remove the yarn cache
@@ -228,8 +298,12 @@ _copy_code() {
     find "${SERVERROOT}/usr/${APP_NAME}/venv/" -name "_tkinter*" -print0 | xargs -0 rm -rf
 
     pushd "${SOURCEDIR}/web" > /dev/null || exit
-        yarn set version berry
-        yarn set version 4
+        YARN_VERSION=$(node -p "require('./package.json').packageManager.split('@')[1]")
+        if [ -z "${YARN_VERSION}" ]; then
+            echo "ERROR: Could not determine Yarn version from package.json packageManager field."
+            exit 1
+        fi
+        yarn set version "${YARN_VERSION}"
         yarn install
         yarn run bundle
     popd > /dev/null || exit
@@ -239,7 +313,7 @@ _copy_code() {
     cp "${SOURCEDIR}/pkg/linux/config_distro.py" "${SERVERROOT}/usr/${APP_NAME}/web/"
     cd "${SERVERROOT}/usr/${APP_NAME}/web/" || exit
     rm -f pgadmin4.db config_local.*
-    rm -rf jest.config.js babel.* package.json .yarn* yarn* .editorconfig .eslint* node_modules/ regression/ tools/ pgadmin/static/js/generated/.cache
+    rm -rf jest.config.js babel.* package.json .yarn* yarn* webpack.* .editorconfig .eslint* node_modules/ regression/ tools/ pgadmin/static/js/generated/.cache
     find . -name "tests" -type d -print0 | xargs -0 rm -rf
     find . -name "feature_tests" -type d -print0 | xargs -0 rm -rf
     find . -name "__pycache__" -type d -print0 | xargs -0 rm -rf

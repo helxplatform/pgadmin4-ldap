@@ -31,6 +31,58 @@ from pgadmin.model import db
 OAUTH2_LOGOUT = 'oauth2.logout'
 OAUTH2_AUTHORIZE = 'oauth2.authorize'
 
+# OAuth2 settings that legitimately live at the top level of the
+# configuration. Every other OAUTH2_* setting belongs *inside* an entry
+# of the OAUTH2_CONFIG list and is ignored if set at the top level.
+_TOP_LEVEL_OAUTH2_SETTINGS = {'OAUTH2_CONFIG', 'OAUTH2_AUTO_CREATE_USER'}
+
+
+def warn_on_misplaced_oauth2_config(app):
+    """Warn when per-provider OAuth2 settings have been supplied as
+    top-level configuration variables instead of inside an OAUTH2_CONFIG
+    entry.
+
+    pgAdmin only reads provider settings from the OAUTH2_CONFIG list, so
+    values such as a top-level OAUTH2_CLIENT_ID or OAUTH2_SSL_CERT_VERIFICATION
+    are silently ignored. This is an easy trap in container deployments:
+    every other setting is configured as PGADMIN_CONFIG_<KEY>, so it is
+    natural to assume PGADMIN_CONFIG_OAUTH2_CLIENT_ID and friends will work
+    the same way, when in fact OAuth2 must be configured through a single
+    PGADMIN_CONFIG_OAUTH2_CONFIG holding the provider list. Surfacing this
+    loudly turns a silent misconfiguration into a diagnosable one (see
+    issue #10053).
+    """
+    misplaced = sorted(
+        key for key in dir(config)
+        if key.startswith('OAUTH2_') and
+        key not in _TOP_LEVEL_OAUTH2_SETTINGS
+    )
+    if not misplaced:
+        return
+
+    # If at least one provider is actually configured in OAUTH2_CONFIG we
+    # assume the deployment knows what it is doing and stay quiet, even if
+    # some stray top-level keys are also present.
+    providers_configured = any(
+        isinstance(provider, dict) and provider.get('OAUTH2_NAME')
+        for provider in (getattr(config, 'OAUTH2_CONFIG', None) or [])
+    )
+    if providers_configured:
+        return
+
+    app.logger.warning(
+        "OAuth2: the following settings are defined at the top level of the "
+        "configuration but pgAdmin reads OAuth2 provider settings only from "
+        "the OAUTH2_CONFIG list, so they are being ignored: %s. If you are "
+        "configuring OAuth2 through individual PGADMIN_CONFIG_OAUTH2_* "
+        "environment variables, this will not work; configure a single "
+        "PGADMIN_CONFIG_OAUTH2_CONFIG holding the provider list instead, "
+        "e.g. PGADMIN_CONFIG_OAUTH2_CONFIG='[{\"OAUTH2_NAME\": \"...\", "
+        "\"OAUTH2_CLIENT_ID\": \"...\"}]'. See the OAuth2 documentation for "
+        "details.",
+        ", ".join(misplaced)
+    )
+
 
 class Oauth2Module(PgAdminModule):
     def register(self, app, options):
@@ -52,16 +104,37 @@ def init_app(app):
                      methods=['GET', 'POST'])
     @pgCSRFProtect.exempt
     def oauth_authorize():
-        auth_obj = session['auth_obj']
-        auth_obj.set_current_source(auth_obj.source.get_source_name())
+        # Reconstruct the minimal AuthSourceManager state from the session.
+        # The previous design stored a live AuthSourceManager instance,
+        # which required serializable-anything session storage and
+        # presented a deserialization vector. Now we persist only the
+        # OAuth2 provider name and re-look-up the auth-source from
+        # current_app's registry.
+        from pgadmin.authenticate import AuthSourceManager, get_auth_sources
+        oauth2_client = session.get('oauth2_current_client')
+        if not oauth2_client:
+            current_app.logger.warning(
+                "OAuth2 callback received without provider context; "
+                "session may have expired between login and callback")
+            flash(gettext("Login session expired. Please try again."),
+                  MessageType.ERROR)
+            return redirect(get_safe_post_logout_redirect())
+
+        oauth2_source = get_auth_sources(OAUTH2)
+        # Restore the provider selection onto the (process-global) source
+        # instance so login() picks the right OAuth2 client.
+        oauth2_source.oauth2_current_client = oauth2_client
+
+        auth_obj = AuthSourceManager({}, [OAUTH2])
+        auth_obj.set_source(oauth2_source)
+        auth_obj.set_current_source(oauth2_source.get_source_name())
+
         status, msg = auth_obj.login()
         if status:
             session['auth_source_manager'] = auth_obj.as_dict()
-            if 'auth_obj' in session:
-                session.pop('auth_obj')
+            session.pop('oauth2_current_client', None)
             return redirect(get_safe_post_login_redirect())
-        if 'auth_obj' in session:
-            session.pop('auth_obj')
+        session.pop('oauth2_current_client', None)
         logout_user()
         flash(msg, MessageType.ERROR)
         return redirect(get_safe_post_login_redirect())
@@ -92,6 +165,8 @@ def init_app(app):
 
     app.register_blueprint(blueprint)
     app.login_manager.logout_view = OAUTH2_LOGOUT
+
+    warn_on_misplaced_oauth2_config(app)
 
 
 class OAuth2Authentication(BaseAuthentication):
@@ -263,6 +338,33 @@ class OAuth2Authentication(BaseAuthentication):
         return token
 
     def _authorize_access_token(self, provider_name, provider, client):
+        # Pre-flight: if the provider's scope includes 'openid', the
+        # OAuth server will return an id_token that pgAdmin must
+        # verify. Verification requires JWKS, which Authlib fetches
+        # via the discovery document. Without OAUTH2_SERVER_METADATA_URL,
+        # verification fails deep inside Authlib with a cryptic
+        # `Missing "jwks_uri" in metadata` error. Catch the misconfig
+        # here with actionable guidance, before any network round-trip.
+        scope = provider.get('OAUTH2_SCOPE') or ''
+        scope_parts = scope.split() if isinstance(scope, str) else []
+        metadata_url = provider.get('OAUTH2_SERVER_METADATA_URL')
+        if isinstance(metadata_url, str):
+            metadata_url = metadata_url.strip()
+        if 'openid' in scope_parts and not metadata_url:
+            guidance = gettext(
+                "OAuth2 provider '%(name)s' is configured with 'openid' "
+                "in OAUTH2_SCOPE but OAUTH2_SERVER_METADATA_URL is not "
+                "set. pgAdmin needs the provider's OpenID Connect "
+                "discovery URL to verify the id_token. Either set "
+                "OAUTH2_SERVER_METADATA_URL to the discovery URL "
+                "(e.g. https://<issuer>/.well-known/openid-"
+                "configuration), or remove 'openid' from OAUTH2_SCOPE."
+            ) % {'name': provider_name}
+            current_app.logger.error(
+                "OAuth2 (%s): %s", provider_name, guidance
+            )
+            raise RuntimeError(guidance)
+
         client_auth_method = provider.get(
             'OAUTH2_CLIENT_AUTH_METHOD', 'client_secret'
         )

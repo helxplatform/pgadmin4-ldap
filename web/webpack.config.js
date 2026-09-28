@@ -143,7 +143,7 @@ module.exports = [{
           presets: [['@babel/preset-env', {'modules': 'commonjs', 'useBuiltIns': 'usage', 'corejs': 3}], ['@babel/preset-react', {
             'runtime': 'automatic'
           }], '@babel/preset-typescript'],
-          plugins: ['@babel/plugin-proposal-class-properties', '@babel/proposal-object-rest-spread'],
+          plugins: ['@babel/plugin-transform-class-properties', '@babel/plugin-transform-object-rest-spread'],
         },
       },
     }, {
@@ -290,14 +290,14 @@ module.exports = [{
         },
       },
       generator: {
-        filename: 'img/[name].[ext]',
+        filename: 'img/[name][ext]',
       },
       exclude: /vendor/,
     },{
       test: /\.(eot|ttf|woff|woff2)$/,
       type: 'asset/resource',
       generator: {
-        filename: 'fonts/[name].[ext]',
+        filename: 'fonts/[name][ext]',
       },
       include: [
         /node_modules/,

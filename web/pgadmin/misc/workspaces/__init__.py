@@ -17,6 +17,7 @@ from flask_babel import gettext
 from flask_security import current_user
 from pgadmin.utils import PgAdminModule
 from pgadmin.model import db, Server
+from pgadmin.utils.server_access import get_server
 from pgadmin.utils.driver import get_driver
 from pgadmin.utils.ajax import bad_request, make_json_response
 from pgadmin.browser.server_groups.servers.utils import (
@@ -92,8 +93,14 @@ def adhoc_connect_server():
                 ).format(arg)
             )
 
-    connection_params = convert_connection_parameter(
-        data.get('connection_params', []))
+    # convert_connection_parameter() is bidirectional. For a save path we
+    # want the storage shape (dict). If the input is already a dict, keep
+    # it; otherwise assume frontend list shape and convert.
+    raw_params = data.get('connection_params', [])
+    if isinstance(raw_params, dict):
+        connection_params = raw_params
+    else:
+        connection_params = convert_connection_parameter(raw_params)
 
     if connection_params is not None:
         if 'hostaddr' in connection_params and \
@@ -132,7 +139,8 @@ def adhoc_connect_server():
                                              username=new_username,
                                              name=new_server_name,
                                              role=new_role,
-                                             service=new_service
+                                             service=new_service,
+                                             user_id=current_user.id
                                              ).all()
 
             # If found matching servers then compare the connection_params as
@@ -143,25 +151,47 @@ def adhoc_connect_server():
                     server = existing_server
                     break
         else:
-            server = Server.query.filter_by(host=new_host,
-                                            port=new_port,
-                                            maintenance_db=new_db,
-                                            username=new_username,
-                                            name=new_server_name,
-                                            role=new_role,
-                                            service=new_service,
-                                            connection_params=connection_params
-                                            ).first()
+            server = Server.query.filter_by(
+                host=new_host, port=new_port,
+                maintenance_db=new_db,
+                username=new_username,
+                name=new_server_name,
+                role=new_role,
+                service=new_service,
+                connection_params=connection_params,
+                user_id=current_user.id
+            ).first()
 
         # If server is none then no server with the above combination is found.
         if server is None:
             # Check if sid is present in data if it is then used that sid.
             if ('sid' in data and data['sid'] is not None and
                     int(data['sid']) > 0):
-                server = Server.query.filter_by(id=data['sid']).first()
+                server = get_server(data['sid'])
+                if server is None:
+                    return bad_request(gettext(
+                        "Could not find the required server."
+                    ))
 
                 # Clone the server object
                 server = server.clone()
+
+                # Server.clone() copies every column from the source row,
+                # including user_id/shared/shared_username. When the source
+                # is another user's shared server, the clone must not inherit
+                # that ownership: force the new adhoc record to belong to the
+                # current user and to be private, otherwise a non-owner ends
+                # up persisting a cross-tenant, administrator-owned server
+                # row.
+                server.user_id = current_user.id
+                server.shared = False
+                server.shared_username = None
+                # The clone also inherits the source server's stored
+                # credentials; drop them so a non-owner can't persist
+                # another user's secret material under their own row.
+                server.password = None
+                server.save_password = False
+                server.tunnel_password = None
 
                 # Replace the following with the new/changed value.
                 server.maintenance_db = new_db
@@ -220,23 +250,30 @@ def check_and_delete_adhoc_server(sid):
     This function is used to check for adhoc server and if all Query Tool
     and PSQL connections are closed then delete that server.
     """
-    server = Server.query.filter_by(id=sid).first()
-    if server.is_adhoc:
-        # Check PSQL connections. If more connections are open for
-        # the given sid return from the function.
-        psql_connections = get_open_psql_connections()
-        if sid in psql_connections.values():
+    server = get_server(sid)
+    if server is None:
+        # Server may be deleted or inaccessible; still attempt
+        # best-effort cleanup of adhoc state.
+        delete_adhoc_servers(sid)
+        return
+    if not server.is_adhoc:
+        return
+
+    # Check PSQL connections. If more connections are open for
+    # the given sid return from the function.
+    psql_connections = get_open_psql_connections()
+    if sid in psql_connections.values():
+        return
+
+    # Check Query Tool connections for the given sid
+    manager = get_driver(PG_DEFAULT_DRIVER).connection_manager(sid)
+    for key, value in manager.connections.items():
+        if key.startswith('CONN') and value.connected():
             return
 
-        # Check Query Tool connections for the given sid
-        manager = get_driver(PG_DEFAULT_DRIVER).connection_manager(sid)
-        for key, value in manager.connections.items():
-            if key.startswith('CONN') and value.connected():
-                return
+    # Assumption at this point all the Query Tool and PSQL connections
+    # is closed, so now we can release the manager
+    manager.release()
 
-        # Assumption at this point all the Query Tool and PSQL connections
-        # is closed, so now we can release the manager
-        manager.release()
-
-        # Delete the adhoc server from the pgadmin database
-        delete_adhoc_servers(sid)
+    # Delete the adhoc server from the pgadmin database
+    delete_adhoc_servers(sid)

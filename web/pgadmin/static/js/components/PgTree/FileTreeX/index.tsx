@@ -455,10 +455,15 @@ export class FileTreeX extends React.Component<IFileTreeXProps> {
       const label$ = ref.querySelector('span.file-name') as HTMLDivElement;
 
       if (label$) {
+        let className = '';
         if (typeof(label) == 'object' && label.label) {
+          className = label.className ?? '';
           label = label.label;
         }
-        label$.innerHTML = label;
+        // Render the label as plain text (never as an HTML string) and apply
+        // any requested styling via a CSS class instead of embedding markup.
+        label$.textContent = label;
+        label$.className = 'file-name' + (className ? ' ' + className : '');
       }
 
     }
@@ -476,9 +481,9 @@ export class FileTreeX extends React.Component<IFileTreeXProps> {
         ref.style.background = 'none';
         const label$ = ref.querySelector('span.children-count') as HTMLDivElement;
         if(dir.children && dir.children.length > 0) {
-          label$.innerHTML = '(' + dir.children.length + ')';
+          label$.textContent = '(' + dir.children.length + ')';
         } else {
-          label$.innerHTML = '';
+          label$.textContent = '';
         }
       }
     }

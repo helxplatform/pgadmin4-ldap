@@ -165,12 +165,19 @@ class BaseTableView(PGChildNodeView, BasePartitionTable, VacuumSettings):
 
         return wrap
 
-    def _formatter(self, did, scid, tid, data, with_serial_cols=False):
+    def _formatter(self, did, scid, tid, data, with_serial_cols=True):
         """
         Args:
             data: dict of query result
             scid: schema oid
             tid: table oid
+            with_serial_cols: when True (default), reverse-engineer
+                ``integer + nextval('<table>_<col>_seq')`` columns back
+                to their ``serial`` / ``smallserial`` / ``bigserial``
+                declaration so emitted DDL round-trips on a clean
+                target. Pass ``False`` only for low-level introspection
+                callers that handle the sequence themselves.
+                Issue #9896.
 
         Returns:
             It will return formatted output of query result
@@ -488,7 +495,7 @@ class BaseTableView(PGChildNodeView, BasePartitionTable, VacuumSettings):
 
         return condition
 
-    def fetch_tables(self, sid, did, scid, tid=None, with_serial_cols=False):
+    def fetch_tables(self, sid, did, scid, tid=None, with_serial_cols=True):
         """
         This function will fetch the list of all the tables
         and will be used by schema diff.
@@ -757,8 +764,7 @@ class BaseTableView(PGChildNodeView, BasePartitionTable, VacuumSettings):
                 self.conn, schema=schema, table=table, did=did, tid=tid,
                 idx=row['oid'], datlastsysoid=self._DATABASE_LAST_SYSTEM_OID,
                 template_path=None, with_header=json_resp,
-                add_not_exists_clause=add_not_exists_clause
-            )
+                add_not_exists_clause=add_not_exists_clause)
             index_sql = "\n" + index_sql
 
             # Add into main sql
@@ -889,7 +895,7 @@ class BaseTableView(PGChildNodeView, BasePartitionTable, VacuumSettings):
             rules_sql += render_template("/".join(
                 [self.rules_template_path, self._CREATE_SQL]),
                 data=res_data, display_comments=display_comments,
-                add_replace_clause=True
+                add_replace_clause=True, conn=self.conn
             )
 
             # Add into main sql
@@ -1002,8 +1008,9 @@ class BaseTableView(PGChildNodeView, BasePartitionTable, VacuumSettings):
                 partition_sql_arr.append(partition_main_sql)
 
                 # Get Reverse engineered sql for index
-                self._get_resql_for_index(did, row['oid'], partition_sql_arr,
-                                          json_resp, schema, table)
+                self._get_resql_for_index(
+                    did, row['oid'], partition_sql_arr,
+                    json_resp, schema, table)
 
                 # Get Reverse engineered sql for ROW SECURITY POLICY
                 self._get_resql_for_row_security_policy(scid, row['oid'],
@@ -1277,6 +1284,52 @@ class BaseTableView(PGChildNodeView, BasePartitionTable, VacuumSettings):
                         self.double_newline
         return column_sql
 
+    @staticmethod
+    def _normalise_serial_column(data, old_col_data):
+        """
+        Reconcile a column that has been reprojected as SERIAL/SMALLSERIAL/
+        BIGSERIAL with the raw catalogue properties of its old self, so that
+        update.sql renders only the genuine changes.
+
+        Schema Diff compares tables fetched with with_serial_cols=True, so a
+        column declared as SERIAL reaches us carrying the pseudo-type as its
+        cltype and an emptied default, whilst its old properties are read
+        straight from the catalogue and carry the underlying integer type
+        along with the real nextval() default. Left alone, that asymmetry
+        made any serial column with a genuine difference (a comment, a NOT
+        NULL, a privilege) also render an invalid
+        `ALTER COLUMN ... TYPE bigserial`, a spurious DROP DEFAULT, and a
+        set of sequence options that only an identity column accepts
+        (#10236).
+
+        The pseudo-type is shorthand for a declaration rather than a type
+        ALTER COLUMN can be given, so compare and alter the underlying
+        integer type instead, drop the default the reprojection emptied,
+        and leave the owned sequence to be compared as the object it is in
+        its own right.
+
+        :param data: The changed column, modified in place
+        :param old_col_data: Properties of the column as it stands now
+        """
+        cltype = data.get('cltype')
+        if cltype not in column_utils.UNDERLYING_SERIAL_TYPES:
+            return
+
+        data['cltype'] = column_utils.UNDERLYING_SERIAL_TYPES[cltype]
+        if data.get('typname') == cltype:
+            data['typname'] = data['cltype']
+
+        # The reprojection emptied the nextval() default; that is not a
+        # request to drop it.
+        data.pop('defval', None)
+
+        # Sequence options ride along with a column because it owns a
+        # sequence, but ALTER COLUMN only accepts them for identity
+        # columns; the sequence itself is compared as a separate object.
+        for key in ('seqincrement', 'seqstart', 'seqmin', 'seqmax',
+                    'seqcache', 'seqcycle'):
+            data.pop(key, None)
+
     def _check_for_column_update(self, columns, data, column_sql, tid):
         # Here we will be needing previous properties of column
         # so that we can compare & update it
@@ -1310,6 +1363,8 @@ class BaseTableView(PGChildNodeView, BasePartitionTable, VacuumSettings):
                 old_col_data['cltype'] = \
                     DataTypeReader.parse_type_name(
                         old_col_data['cltype'])
+
+                self._normalise_serial_column(c, old_col_data)
 
                 # Sql for alter column
                 if c.get('inheritedfrom', None) is None and \

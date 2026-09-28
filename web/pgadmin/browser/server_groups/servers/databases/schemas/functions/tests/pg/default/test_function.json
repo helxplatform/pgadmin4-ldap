@@ -2,13 +2,105 @@
   "scenarios": [
     {
       "type": "create",
+      "name": "Create Extension",
+      "endpoint": "NODE-extension.obj",
+      "sql_endpoint": "NODE-extension.sql_id",
+      "data": {
+        "name": "postgres_fdw",
+        "version": "",
+        "relocatable": true
+      },
+      "store_object_id": true
+    },
+    {
+      "type": "create",
+      "name": "Create function with extensions.",
+      "endpoint": "NODE-function.obj",
+      "msql_endpoint": "NODE-function.msql",
+      "sql_endpoint": "NODE-function.sql_id",
+      "data": {
+        "name": "Function1_$%{}[]()&*^!@\"'`\\/#",
+        "funcowner": "<OWNER>",
+        "pronamespace": 2200,
+        "prorettypename": "character varying",
+        "lanname": "plpgsql",
+        "provolatile": "v",
+        "proretset": false,
+        "proisstrict": true,
+        "prosecdef": true,
+        "proiswindow": true,
+        "proparallel": "u",
+        "procost": "100",
+        "prorows": "0",
+        "proleakproof": true,
+        "arguments": [
+          {
+            "argtype": "character varying",
+            "argmode": "IN",
+            "argname": "param",
+            "argdefval": "'1'"
+          }
+        ],
+        "prosrc": "begin\nselect '1';\nend",
+        "probin": "$libdir/",
+        "options": [],
+        "variables": [
+          {
+            "name": "enable_sort",
+            "value": true
+          }
+        ],
+        "seclabels": [],
+        "acl": [],
+        "dependsonextensions": [
+          "plpgsql",
+          "postgres_fdw"
+        ],
+        "schema": "public"
+      },
+      "expected_sql_file": "create_function_on_depends.sql",
+      "expected_msql_file": "create_function_on_depends.msql"
+    },
+    {
+      "type": "alter",
+      "name": "Alter function with NO DEPENDS ON",
+      "endpoint": "NODE-function.obj_id",
+      "msql_endpoint": "NODE-function.msql_id",
+      "sql_endpoint": "NODE-function.sql_id",
+      "data": {
+        "dependsonextensions": [
+          "plpgsql"
+        ]
+      },
+      "expected_sql_file": "alter_function_no_depends.sql",
+      "expected_msql_file": "alter_function_no_depends.msql"
+    },
+    {
+      "type": "delete",
+      "name": "Drop function",
+      "endpoint": "NODE-function.delete_id",
+      "data": {}
+    },
+    {
+      "type": "delete",
+      "name": "Drop Extension",
+      "endpoint": "NODE-extension.delete",
+      "data": {
+        "ids": [
+          "<postgres_fdw>"
+        ]
+      },
+      "preprocess_data": true
+    },
+    {
+      "type": "create",
       "name": "Create function with all options.",
       "endpoint": "NODE-function.obj",
       "msql_endpoint": "NODE-function.msql",
       "sql_endpoint": "NODE-function.sql_id",
       "data": {
         "name": "Function1_$%{}[]()&*^!@\"'`\\/#",
-        "funcowner": "postgres",
+        "funcowner": "<OWNER>",
         "pronamespace": 2200,
         "prorettypename": "character varying",
         "lanname": "plpgsql",
@@ -61,8 +153,7 @@
       "type": "delete",
       "name": "Drop function",
       "endpoint": "NODE-function.delete_id",
-      "data": {
-      }
+      "data": {}
     },
     {
       "type": "create",
@@ -72,7 +163,7 @@
       "sql_endpoint": "NODE-function.sql_id",
       "data": {
         "name": "Function2_$%{}[]()&*^!@\"'`\\/#",
-        "funcowner": "postgres",
+        "funcowner": "<OWNER>",
         "pronamespace": 2200,
         "prorettypename": "character varying",
         "lanname": "plpgsql",
@@ -103,7 +194,7 @@
       "msql_endpoint": "NODE-function.msql_id",
       "sql_endpoint": "NODE-function.sql_id",
       "data": {
-        "name":"Function3_$%{}[]()&*^!@\"'`\\/#"
+        "name": "Function3_$%{}[]()&*^!@\"'`\\/#"
       },
       "expected_sql_file": "alter_function_rename.sql",
       "expected_msql_file": "alter_function_rename.msql"
@@ -151,8 +242,7 @@
       "type": "delete",
       "name": "Drop function",
       "endpoint": "NODE-function.delete_id",
-      "data": {
-      }
+      "data": {}
     },
     {
       "type": "create",
@@ -162,7 +252,7 @@
       "sql_endpoint": "NODE-function.sql_id",
       "data": {
         "name": "Function2_$%{}[]()&*^!@\"'`\\/#",
-        "funcowner": "postgres",
+        "funcowner": "<OWNER>",
         "pronamespace": 2200,
         "prorettypename": "character varying",
         "lanname": "plpgsql",
@@ -196,8 +286,8 @@
         "acl": {
           "added": [
             {
-              "grantee": "postgres",
-              "grantor": "postgres",
+              "grantee": "<OWNER>",
+              "grantor": "<OWNER>",
               "privileges": [
                 {
                   "privilege_type": "X",
@@ -223,7 +313,7 @@
           "deleted": [
             {
               "grantee": "PUBLIC",
-              "grantor": "postgres",
+              "grantor": "<OWNER>",
               "privileges": [
                 {
                   "privilege_type": "X",
@@ -234,7 +324,9 @@
             }
           ]
         }
-      }
+      },
+      "expected_sql_file": "alter_func_remove_partial_pri.sql",
+      "expected_msql_file": "alter_func_remove_partial_pri.msql"
     },
     {
       "type": "alter",
@@ -247,8 +339,8 @@
           "changed": [
             {
               "grantee": "PUBLIC",
-              "grantor": "postgres",
-              "old_grantee": "postgres",
+              "grantor": "<OWNER>",
+              "old_grantee": "<OWNER>",
               "privileges": [
                 {
                   "privilege_type": "X",
@@ -274,7 +366,7 @@
           "deleted": [
             {
               "grantee": "PUBLIC",
-              "grantor": "postgres",
+              "grantor": "<OWNER>",
               "privileges": [
                 {
                   "privilege_type": "X",
@@ -284,8 +376,8 @@
               ]
             },
             {
-              "grantee": "postgres",
-              "grantor": "postgres",
+              "grantee": "<OWNER>",
+              "grantor": "<OWNER>",
               "privileges": [
                 {
                   "privilege_type": "X",
@@ -304,8 +396,46 @@
       "type": "delete",
       "name": "Drop function",
       "endpoint": "NODE-function.delete_id",
+      "data": {}
+    },
+    {
+      "type": "create",
+      "endpoint": "NODE-function.obj",
+      "msql_endpoint": "NODE-function.msql",
+      "sql_endpoint": "NODE-function.sql_id",
+      "name": "Create function (atomic).",
+      "store_object_id": "True",
       "data": {
-      }
+        "name": "Function4_$%{}[]()&*^!@\"'`\\/#",
+        "funcowner": "<OWNER>",
+        "pronamespace": 2200,
+        "prorettypename": "numeric",
+        "lanname": "sql",
+        "prorows": 0,
+        "arguments": [],
+        "prosrc": "begin atomic\n    select 1;\nend",
+        "probin": "$libdir/",
+        "options": [],
+        "variables": [],
+        "seclabels": [],
+        "prosecdef": true,
+        "acl": [],
+        "provolatile": "v",
+        "proisstrict": true,
+        "proiswindow": true,
+        "proparallel": "u",
+        "procost": "100",
+        "proleakproof": true,
+        "schema": "public"
+      },
+      "expected_sql_file": "create_atomic_func.sql",
+      "expected_msql_file": "create_atomic_func.msql"
+    },
+    {
+      "type": "delete",
+      "name": "Drop function",
+      "endpoint": "NODE-function.delete_id",
+      "data": {}
     },
     {
       "type": "create",
@@ -315,7 +445,7 @@
       "name": "Create function with custom return type.",
       "data": {
         "name": "Function3_$%{}[]()&*^!@\"'`\\/#",
-        "funcowner": "postgres",
+        "funcowner": "<OWNER>",
         "pronamespace": 2200,
         "prorettypename": "table(val character varying)",
         "lanname": "plpgsql",
@@ -336,7 +466,7 @@
             "argdefval": "'1'"
           }
         ],
-        "prosrc": "begin\n  return query select '1'::character varying;\nend",
+        "prosrc": "begin\n    return query select '1'::character varying;\nend",
         "probin": "$libdir/",
         "options": [],
         "variables": [],
@@ -351,8 +481,7 @@
       "type": "delete",
       "name": "Drop function",
       "endpoint": "NODE-function.delete_id",
-      "data": {
-      }
+      "data": {}
     }
   ]
 }

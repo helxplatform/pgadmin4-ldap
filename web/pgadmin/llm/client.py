@@ -10,7 +10,8 @@
 """Base LLM client interface and factory."""
 
 from abc import ABC, abstractmethod
-from typing import Optional
+from collections.abc import Generator
+from typing import Optional, Union
 
 from pgadmin.llm.models import (
     Message, Tool, LLMResponse, LLMError
@@ -54,7 +55,6 @@ class LLMClient(ABC):
         tools: Optional[list[Tool]] = None,
         system_prompt: Optional[str] = None,
         max_tokens: int = 4096,
-        temperature: float = 0.0,
         **kwargs
     ) -> LLMResponse:
         """
@@ -65,7 +65,6 @@ class LLMClient(ABC):
             tools: Optional list of tools the LLM can use.
             system_prompt: Optional system prompt to set context.
             max_tokens: Maximum tokens in the response.
-            temperature: Sampling temperature (0.0 = deterministic).
             **kwargs: Additional provider-specific parameters.
 
         Returns:
@@ -75,6 +74,48 @@ class LLMClient(ABC):
             LLMError: If the request fails.
         """
         pass
+
+    def chat_stream(
+        self,
+        messages: list[Message],
+        tools: Optional[list[Tool]] = None,
+        system_prompt: Optional[str] = None,
+        max_tokens: int = 4096,
+        temperature: float = 0.0,
+        **kwargs
+    ) -> Generator[Union[str, LLMResponse], None, None]:
+        """
+        Stream a chat response from the LLM.
+
+        Yields text chunks (str) as they arrive, then yields
+        a final LLMResponse with the complete response metadata.
+
+        The default implementation falls back to non-streaming chat().
+
+        Args:
+            messages: List of conversation messages.
+            tools: Optional list of tools the LLM can use.
+            system_prompt: Optional system prompt to set context.
+            max_tokens: Maximum tokens in the response.
+            temperature: Sampling temperature (0.0 = deterministic).
+            **kwargs: Additional provider-specific parameters.
+
+        Yields:
+            str: Text content chunks as they arrive.
+            LLMResponse: Final response with complete metadata (last item).
+        """
+        # Default: fall back to non-streaming
+        response = self.chat(
+            messages=messages,
+            tools=tools,
+            system_prompt=system_prompt,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            **kwargs
+        )
+        if response.content:
+            yield response.content
+        yield response
 
     def validate_connection(self) -> tuple[bool, Optional[str]]:
         """
@@ -128,10 +169,12 @@ def get_llm_client(
     """
     from pgadmin.llm.utils import (
         get_default_provider,
-        get_anthropic_api_key, get_anthropic_model,
-        get_openai_api_key, get_openai_model,
+        get_anthropic_api_url, get_anthropic_api_key, get_anthropic_model,
+        get_openai_api_url, get_openai_api_key, get_openai_model,
         get_ollama_api_url, get_ollama_model,
-        get_docker_api_url, get_docker_model
+        get_docker_api_url, get_docker_model,
+        is_pref_api_url_rejected,
+        is_pref_api_key_path_rejected,
     )
 
     # Determine which provider to use
@@ -142,30 +185,68 @@ def get_llm_client(
 
     provider = provider.lower()
 
+    def _rejected_url_error(prov):
+        return LLMClientError(LLMError(
+            message=(
+                f"The configured {prov} API URL is not in the "
+                "allowed list (ALLOWED_LLM_API_URLS). Add it to "
+                "config_local.py, or clear the API URL preference "
+                "to use the system default."
+            ),
+            provider=prov,
+        ))
+
+    def _rejected_key_file_error(prov):
+        return LLMClientError(LLMError(
+            message=(
+                f"The configured {prov} API key file is not within "
+                "your private user storage. Move the key file to "
+                "your private storage directory, or clear the API "
+                "Key File preference to use the system default."
+            ),
+            provider=prov,
+        ))
+
     if provider == 'anthropic':
         from pgadmin.llm.providers.anthropic import AnthropicClient
+        if is_pref_api_url_rejected('anthropic_api_url'):
+            raise _rejected_url_error('anthropic')
+        if is_pref_api_key_path_rejected('anthropic_api_key_file'):
+            raise _rejected_key_file_error('anthropic')
         api_key = get_anthropic_api_key()
-        if not api_key:
+        api_url = get_anthropic_api_url()
+        if not api_key and not api_url:
             raise LLMClientError(LLMError(
                 message="Anthropic API key not configured",
                 provider="anthropic"
             ))
         model_name = model or get_anthropic_model()
-        return AnthropicClient(api_key=api_key, model=model_name)
+        return AnthropicClient(
+            api_key=api_key, model=model_name, api_url=api_url
+        )
 
     elif provider == 'openai':
         from pgadmin.llm.providers.openai import OpenAIClient
+        if is_pref_api_url_rejected('openai_api_url'):
+            raise _rejected_url_error('openai')
+        if is_pref_api_key_path_rejected('openai_api_key_file'):
+            raise _rejected_key_file_error('openai')
         api_key = get_openai_api_key()
-        if not api_key:
+        api_url = get_openai_api_url()
+        if not api_key and not api_url:
             raise LLMClientError(LLMError(
                 message="OpenAI API key not configured",
                 provider="openai"
             ))
         model_name = model or get_openai_model()
-        return OpenAIClient(api_key=api_key, model=model_name)
+        return OpenAIClient(
+            api_key=api_key, model=model_name, api_url=api_url
+        )
 
     elif provider == 'ollama':
         from pgadmin.llm.providers.ollama import OllamaClient
+        if is_pref_api_url_rejected('ollama_api_url'):
+            raise _rejected_url_error('ollama')
         api_url = get_ollama_api_url()
         if not api_url:
             raise LLMClientError(LLMError(
@@ -177,6 +258,8 @@ def get_llm_client(
 
     elif provider == 'docker':
         from pgadmin.llm.providers.docker import DockerClient
+        if is_pref_api_url_rejected('docker_api_url'):
+            raise _rejected_url_error('docker')
         api_url = get_docker_api_url()
         if not api_url:
             raise LLMClientError(LLMError(

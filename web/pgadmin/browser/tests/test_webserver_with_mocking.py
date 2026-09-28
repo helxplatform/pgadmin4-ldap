@@ -8,6 +8,7 @@
 ##########################################################################
 
 import config as app_config
+from pgAdmin4 import app
 from pgadmin.utils.route import BaseTestGenerator
 from regression.python_test_utils import test_utils as utils
 from pgadmin.authenticate.registry import AuthSourceRegistry
@@ -68,8 +69,12 @@ class WebserverLoginMockTestCase(BaseTestGenerator):
                                 None
                                 )
         self.assertEqual(res.status_code, 200)
-        respdata = 'Gravatar image for %s' % self.username
-        self.assertTrue(respdata in res.data.decode('utf8'))
+        # "Gravatar image for X" was server-rendered HTML; the React SPA
+        # renders it client-side. Verify successful auth via session.
+        with self.tester.session_transaction() as sess:
+            self.assertIsNotNone(
+                sess.get('_user_id'),
+                'Post-webserver-login session should contain _user_id')
 
     def tearDown(self):
         pass
@@ -83,4 +88,5 @@ class WebserverLoginMockTestCase(BaseTestGenerator):
         cls.tester.logout()
         app_config.AUTHENTICATION_SOURCES = [INTERNAL]
         app_config.PGADMIN_EXTERNAL_AUTH_SOURCE = INTERNAL
+        app.PGADMIN_EXTERNAL_AUTH_SOURCE = INTERNAL
         utils.login_tester_account(cls.tester)

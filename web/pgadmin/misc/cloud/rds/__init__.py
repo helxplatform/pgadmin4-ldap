@@ -10,18 +10,16 @@
 # AWS RDS Cloud Deployment Implementation
 
 import requests
-import boto3
 import json
-import pickle
-from boto3.session import Session
 from flask_babel import gettext
 from flask import session, current_app, request
 from pgadmin.user_login_check import pga_login_required
 from werkzeug.datastructures import Headers
 from pgadmin.utils import PgAdminModule
+from pgadmin.utils.text_sanitize import sanitize_external_text
 from pgadmin.misc.cloud.utils import _create_server, CloudProcessDesc
 from pgadmin.misc.bgprocess.processes import BatchProcess
-from pgadmin.utils.ajax import make_json_response,\
+from pgadmin.utils.ajax import make_json_response, \
     internal_server_error, bad_request, success_return
 from .regions import AWS_REGIONS
 import json
@@ -60,8 +58,10 @@ def verify_credentials():
     if 'aws' not in session:
         session['aws'] = {}
 
-    if 'aws_rds_obj' not in session['aws'] or\
-            session['aws']['secret'] != data['secret']:
+    # Re-validate when this is the first call (no creds cached yet) or
+    # when the supplied creds differ from what's in session.
+    cached_secret = session['aws'].get('secret')
+    if cached_secret is None or cached_secret != data['secret']:
         _rds = RDS(
             access_key=data['secret']['access_key'],
             secret_key=data['secret']['secret_access_key'],
@@ -70,12 +70,15 @@ def verify_credentials():
         status, identity = _rds.validate_credentials()
         if status:
             session['aws']['secret'] = data['secret']
-            session['aws']['aws_rds_obj'] = pickle.dumps(_rds, -1)
             msg = 'verified'
         else:
             msg = identity
+    else:
+        # Creds unchanged from a previous successful verify — already valid.
+        status = True
+        msg = 'verified'
 
-    return make_json_response(success=status, info=msg)
+    return make_json_response(success=status, info=sanitize_external_text(msg))
 
 
 @blueprint.route('/db_instances/',
@@ -87,7 +90,8 @@ def get_db_instances():
     """
     # Get Engine Version
     eng_version = request.args.get('eng_version')
-    if 'aws' not in session:
+    rds_obj = _get_rds_from_session()
+    if rds_obj is None:
         return make_json_response(
             status=410,
             success=0,
@@ -97,7 +101,6 @@ def get_db_instances():
     if not eng_version or eng_version == '' or eng_version == 'undefined':
         eng_version = '11.16'
 
-    rds_obj = pickle.loads(session['aws']['aws_rds_obj'])
     res = rds_obj.get_available_db_instance_class(
         engine_version=eng_version)
     versions_set = set()
@@ -119,14 +122,14 @@ def get_db_instances():
 @pga_login_required
 def get_db_versions():
     """GET AWS Database Versions for AWS."""
-    if 'aws' not in session:
+    rds_obj = _get_rds_from_session()
+    if rds_obj is None:
         return make_json_response(
             status=410,
             success=0,
             errormsg=gettext('Session has not created yet.')
         )
 
-    rds_obj = pickle.loads(session['aws']['aws_rds_obj'])
     db_versions = rds_obj.get_available_db_version()
     res = list(filter(lambda val: not val['EngineVersion'].startswith('9.6'),
                       db_versions['DBEngineVersions']))
@@ -147,6 +150,8 @@ def get_regions():
     """GET Regions for AWS."""
     try:
         clear_aws_session()
+        # Defer boto3.session (heavy import, user action only, cached)
+        from boto3.session import Session
         _session = Session()
         res = _session.get_available_regions('rds')
         regions = []
@@ -164,7 +169,7 @@ def get_regions():
         return make_json_response(
             status=410,
             success=0,
-            errormsg=str(e)
+            errormsg=sanitize_external_text(str(e))
         )
 
 
@@ -172,6 +177,7 @@ class RDS():
     def __init__(self, access_key, secret_key, session_token=None,
                  default_region='ap-south-1'):
         self._clients = {}
+        self._error = None
 
         self._access_key = access_key
         self._secret_key = secret_key
@@ -187,24 +193,35 @@ class RDS():
         if type in self._clients:
             return self._clients[type]
 
-        session = boto3.Session(
-            aws_access_key_id=self._access_key,
-            aws_secret_access_key=self._secret_key,
-            aws_session_token=self._session_token
-        )
+        # Defer boto3 (heavy import, user action only, cached)
+        try:
+            import boto3
+            session = boto3.Session(
+                aws_access_key_id=self._access_key,
+                aws_secret_access_key=self._secret_key,
+                aws_session_token=self._session_token
+            )
 
-        self._clients[type] = session.client(
-            type, region_name=self._default_region)
+            self._clients[type] = session.client(
+                type, region_name=self._default_region)
 
-        return self._clients[type]
+            return self._clients[type]
+        except ImportError as e:
+            self._error = str(e)
+            current_app.logger.error(self._error)
+            return None
 
     def get_available_db_version(self, engine='postgres'):
         rds = self._get_aws_client('rds')
+        if rds is None:
+            return {'DBEngineVersions': []}
         return rds.describe_db_engine_versions(Engine=engine)
 
     def get_available_db_instance_class(self, engine='postgres',
                                         engine_version='10'):
         rds = self._get_aws_client('rds')
+        if rds is None:
+            return []
         _instances = rds.describe_orderable_db_instance_options(
             Engine=engine,
             EngineVersion=engine_version)
@@ -228,14 +245,43 @@ class RDS():
             DBInstanceIdentifier=instance_name)
 
     def validate_credentials(self):
-        client = self._get_aws_client('sts')
         try:
+            client = self._get_aws_client('sts')
+            if client is None:
+                return False, self._error or 'Failed to initialize AWS client.'
             identity = client.get_caller_identity()
             return True, identity
         except Exception as e:
             return False, str(e)
         finally:
-            self._clients.pop('sts')
+            self._clients.pop('sts', None)
+
+
+def _get_rds_from_session():
+    """Build an RDS instance from the credentials cached in
+    `flask.session['aws']['secret']`.
+
+    Returns None when no credentials are cached — callers should treat that
+    as "session has not created yet" and respond accordingly.
+
+    The previous implementation persisted a live RDS instance into the
+    session via an unsafe serializer, which required serializable-anything
+    session storage and represented an insecure-deserialization vector.
+    We now store only the credentials dict and recreate the cheap
+    boto3-backed RDS object per request.
+    """
+    aws = session.get('aws')
+    if not aws:
+        return None
+    secret = aws.get('secret')
+    if not secret:
+        return None
+    return RDS(
+        access_key=secret.get('access_key'),
+        secret_key=secret.get('secret_access_key'),
+        session_token=secret.get('session_token'),
+        default_region=secret.get('region'),
+    )
 
 
 def clear_aws_session():

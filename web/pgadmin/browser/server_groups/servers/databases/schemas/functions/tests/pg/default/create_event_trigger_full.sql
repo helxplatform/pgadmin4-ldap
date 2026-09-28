@@ -6,7 +6,7 @@ CREATE OR REPLACE FUNCTION public."Trig1_$%{}[]()&*^!@""'`\/#"()
     RETURNS SETOF event_trigger
     LANGUAGE 'plpgsql'
     COST 1234
-    VOLATILE LEAKPROOF STRICT SECURITY DEFINER WINDOW
+    STABLE LEAKPROOF STRICT SECURITY DEFINER WINDOW
     ROWS 4321
     SET application_name='appname'
 AS $BODY$
@@ -16,9 +16,9 @@ end;
 $BODY$;
 
 ALTER FUNCTION public."Trig1_$%{}[]()&*^!@""'`\/#"()
-    OWNER TO postgres;
+    OWNER TO <OWNER>;
 
-GRANT EXECUTE ON FUNCTION public."Trig1_$%{}[]()&*^!@""'`\/#"() TO postgres WITH GRANT OPTION;
+GRANT EXECUTE ON FUNCTION public."Trig1_$%{}[]()&*^!@""'`\/#"() TO <OWNER> WITH GRANT OPTION;
 
 REVOKE ALL ON FUNCTION public."Trig1_$%{}[]()&*^!@""'`\/#"() FROM PUBLIC;
 

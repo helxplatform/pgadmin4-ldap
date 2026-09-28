@@ -33,7 +33,16 @@ _build_runtime() {
 
     test -d "${BUILD_ROOT}" || mkdir "${BUILD_ROOT}"
     # Get a fresh copy of electron
-    ELECTRON_VERSION="$(npm info electron version)"
+    # Resolve the electron version from runtime/package.json, NOT from
+    # `npm info electron version`. The latter fetches whatever currently
+    # carries the `latest` dist-tag on the npm registry, which means any
+    # newly published electron release lands in shipped binaries without
+    # review. Keep the build deterministic and pinned.
+    ELECTRON_VERSION=$(sed -nE 's/.*"electron":[[:space:]]*"\^?([0-9.]+)".*/\1/p' "${SOURCE_DIR}/runtime/package.json" | head -1)
+    if [ -z "${ELECTRON_VERSION}" ]; then
+        echo "ERROR: could not resolve electron version from runtime/package.json" >&2
+        exit 1
+    fi
 
     pushd "${BUILD_ROOT}" > /dev/null || exit
         while true;do
@@ -57,8 +66,12 @@ _build_runtime() {
 
     # Install the runtime node_modules, then replace the package.json
     pushd "${BUNDLE_DIR}/Contents/Resources/app/" > /dev/null || exit
-        yarn set version berry
-        yarn set version 4
+        YARN_VERSION=$(node -p "require('./package.json').packageManager.split('@')[1]")
+        if [ -z "${YARN_VERSION}" ]; then
+            echo "ERROR: Could not determine Yarn version from package.json packageManager field."
+            exit 1
+        fi
+        yarn set version "${YARN_VERSION}"
         yarn workspaces focus --production
 
         # remove the yarn cache
@@ -289,10 +302,42 @@ _complete_bundle() {
 
     # Build node modules
     pushd "${SOURCE_DIR}/web" > /dev/null || exit
-        yarn set version berry
-        yarn set version 4
-        yarn install
-        yarn run bundle
+        YARN_VERSION=$(node -p "require('./package.json').packageManager.split('@')[1]")
+        if [ -z "${YARN_VERSION}" ]; then
+            echo "ERROR: Could not determine Yarn version from package.json packageManager field."
+            exit 1
+        fi
+        yarn set version "${YARN_VERSION}"
+        yarn install 2>&1
+
+        # Record the source commit hash before the heavy lint/webpack
+        # steps. `yarn run` needs node_modules so this runs after install,
+        # but it's a pure `git log` redirect (see web/package.json
+        # "git:hash") that costs ~nothing, so doing it up front means the
+        # commit_hash file is captured even if webpack later bails out.
+        echo "==> Recording git hash..."
+        yarn run git:hash
+
+        # Split the "bundle" script into its underlying steps and merge
+        # stderr into stdout, so a crash inside lint/webpack (e.g. an OOM
+        # kill or native-module load failure) leaves a trace in the
+        # Jenkins console instead of an empty gap before the trap fires.
+        # NODE_ENV mirrors the top-level "bundle" npm script (see
+        # web/package.json). NODE_OPTIONS bumps V8's old-space ceiling
+        # past the 3 GB default the npm script uses: at 3 GB the macOS
+        # x64 builder OS-OOM-killed webpack inside TerserPlugin (build
+        # #1294, sealing asset processing at 92%). 6 GB was too much for
+        # the x64 VM's total RAM and pushed earlier steps into low-memory
+        # failures (build #1295), so we land at 4 GB — enough headroom
+        # for Terser without starving the rest of the build. Other build
+        # paths still get 3 GB via the npm script.
+        export NODE_ENV=production
+        export NODE_OPTIONS=--max-old-space-size=4096
+        echo "==> Running ESLint..."
+        yarn run linter 2>&1
+        echo "==> Running webpack bundle..."
+        yarn run webpacker 2>&1
+        unset NODE_ENV NODE_OPTIONS
 
         curl https://curl.se/ca/cacert.pem -o cacert.pem -s
     popd > /dev/null || exit
@@ -301,7 +346,7 @@ _complete_bundle() {
     cp -r "${SOURCE_DIR}/web" "${BUNDLE_DIR}/Contents/Resources/"
     cd "${BUNDLE_DIR}/Contents/Resources/web" || exit
     rm -f pgadmin4.db config_local.*
-    rm -rf jest.config.js babel.* package.json .yarn* yarn* .editorconfig .eslint* node_modules/ regression/ tools/ pgadmin/static/js/generated/.cache
+    rm -rf jest.config.js babel.* package.json .yarn* yarn* webpack.* .editorconfig .eslint* node_modules/ regression/ tools/ pgadmin/static/js/generated/.cache
     find . -name "tests" -type d -print0 | xargs -0 rm -rf
     find . -name "feature_tests" -type d -print0 | xargs -0 rm -rf
     find . -name "__pycache__" -type d -print0 | xargs -0 rm -rf
@@ -325,6 +370,164 @@ _complete_bundle() {
     # Update permissions to make sure all users can access installed pgadmin.
     chmod -R og=u "${BUNDLE_DIR}"
     chmod -R og-w "${BUNDLE_DIR}"
+}
+
+_strip_architecture() {
+    # We only ship a single architecture (matching the build machine, via
+    # ${ARCH}), but some inputs arrive as fat/universal2 Mach-O binaries.
+    # In particular relocatable-python pulls the python.org *universal2*
+    # installer, so the entire Python.framework carries both arm64 and
+    # x86_64 slices; PostgreSQL-sourced dylibs (libpq, libssl, ...) may be
+    # universal too. Strip the foreign slice from every fat Mach-O so the
+    # bundle ships lean. Electron and its helpers are downloaded
+    # single-arch already, so the loop simply skips them.
+    #
+    # NB: lipo invalidates code signatures, so this MUST run before
+    # _codesign_binaries / _codesign_bundle.
+
+    # Map the build ARCH ("arm64"/"x64") to the lipo/Mach-O arch name.
+    local LIPO_ARCH="arm64"
+    if [ "${ARCH}" == "x64" ]; then
+        LIPO_ARCH="x86_64"
+    fi
+
+    echo "Stripping foreign architectures, keeping ${LIPO_ARCH}..."
+
+    # Remove arch-specific stragglers shipped by the universal2 Python
+    # installer: a pure-x86_64 launcher and a stray, never-executed build
+    # object file. Globs keep this independent of the Python version.
+    find "${BUNDLE_DIR}/Contents/Frameworks/Python.framework" \
+        -name 'python*-intel64' -type f -delete
+    find "${BUNDLE_DIR}/Contents/Frameworks/Python.framework" \
+        -path '*/config-*-darwin/python.o' -type f -delete
+
+    # Thin every fat Mach-O in the bundle in place. -type f skips symlinks,
+    # so versioned dylib aliases are left alone and only the real file is
+    # thinned once.
+    local f archs perms
+    while IFS= read -r f; do
+        archs=$(lipo -archs "${f}" 2>/dev/null) || continue   # not Mach-O
+        case " ${archs} " in
+            *" ${LIPO_ARCH} "*) ;;                            # has our slice
+            *)
+                # No slice for our target arch — thinning can't help; this
+                # would need a rebuild from the right arch. Warn loudly.
+                echo "WARNING: ${f} lacks a ${LIPO_ARCH} slice (${archs}); leaving as-is" >&2
+                continue
+                ;;
+        esac
+        # Already single-arch (our arch) — nothing to strip.
+        if [ "$(echo "${archs}" | wc -w)" -le 1 ]; then
+            continue
+        fi
+        echo "Thinning ${f} (${archs} -> ${LIPO_ARCH})"
+        # lipo writes to a separate file, which loses the original mode
+        # (notably the +x bit the signing pass relies on), so capture and
+        # restore the permissions across the swap.
+        perms=$(stat -f '%Lp' "${f}")
+        if lipo -thin "${LIPO_ARCH}" "${f}" -output "${f}.thin"; then
+            chmod "${perms}" "${f}.thin"
+            mv -f "${f}.thin" "${f}"
+        else
+            rm -f "${f}.thin"
+            echo "WARNING: failed to thin ${f}" >&2
+        fi
+    done < <(find "${BUNDLE_DIR}" -type f)
+}
+
+_prune_dangling_symlinks() {
+    # Gatekeeper walks every symlink in the bundle and rejects the whole app
+    # with "invalid destination for symbolic link in bundle" if any link does
+    # not resolve to a real file inside the app. Notarisation does NOT catch
+    # this, so a broken link slips through stapling and only surfaces as a
+    # Gatekeeper failure on the end user's machine.
+    #
+    # The embedded Python.framework ships such links: an arm64-only build still
+    # carries a bin/python*-intel64 launcher symlink (whose target we delete in
+    # _strip_architecture), and the bundled Tcl/Tk frameworks carry
+    # PrivateHeaders links pointing at a Versions/Current that has none. Rather
+    # than hunt individual offenders, prune EVERY dangling symlink so a future
+    # stray link cannot reintroduce the bug.
+    #
+    # NB: this MUST run after _strip_architecture (which orphans links by
+    # deleting their targets) and before _codesign_binaries / _codesign_bundle.
+
+    echo "Pruning dangling symlinks before signing..."
+    # -type l selects symlinks; "! -exec test -e {} \;" keeps only those whose
+    # target does not exist (test -e follows the link). BSD find on macOS.
+    find "${BUNDLE_DIR}" -type l ! -exec test -e {} \; -print -delete
+
+    # Belt and braces: fail the build if anything still dangles, so this can
+    # never silently slip past notarisation into a shipped bundle again.
+    if find "${BUNDLE_DIR}" -type l ! -exec test -e {} \; -print | grep -q .; then
+        echo "ERROR: bundle still contains dangling symlinks (Gatekeeper will reject)" >&2
+        exit 1
+    fi
+}
+
+_verify_bundle_linkage() {
+    # Belt and braces: make sure nothing in the finished bundle links against
+    # a library that lives outside it on the build host. Such a reference
+    # resolves on the build machine but the path is absent on an end user's
+    # Mac (or, for a Homebrew dylib, present-but-rejected by hardened-runtime
+    # library validation for having a different Team ID), so the app dies on
+    # startup before it can even import config.
+    #
+    # The known offender is the Python cryptography module. When no binary
+    # wheel is published for the build architecture (cryptography 49 dropped
+    # the Intel/universal2 macOS wheel, leaving arm64 only), pip compiles it
+    # from source, and its openssl-sys crate links whatever OpenSSL it
+    # discovers on the build host rather than the one we ship: it ignores the
+    # CFLAGS/LDFLAGS the build exports and falls back to Homebrew, baking
+    # e.g. /usr/local/opt/openssl@3/lib/libssl.3.dylib into _rust.abi3.so.
+    # _fixup_imports deliberately skips _rust.abi3.so, so the dangling
+    # reference would otherwise sail through to a shipped DMG. See issue
+    # #10123.
+    #
+    # Everything legitimate in the bundle is either an OS library (/usr/lib,
+    # /System) or a bundle-relative reference (@loader_path, @rpath,
+    # @executable_path), so any absolute install-name under a build-host
+    # prefix is, by definition, wrong.
+    #
+    # NB: run after _complete_bundle (which does the install-name rewriting
+    # via _fixup_imports) so we validate the final, relocated state.
+
+    echo "Verifying bundle library references..."
+
+    # Build-host prefixes that must never appear in a shipped bundle. SLAVE_HOME
+    # (the Jenkins workspace root, under which the self-built OpenSSL and
+    # PostgreSQL live) is only added when set, i.e. on the CI builders.
+    local PREFIXES='/usr/local|/opt/homebrew|/opt/local'
+    if [ -n "${SLAVE_HOME}" ]; then
+        PREFIXES="${PREFIXES}|${SLAVE_HOME}"
+    fi
+
+    local found="" f deps
+    while IFS= read -r f; do
+        # otool prints the filename header then one line per dependency; drop
+        # the header, take the install-name column, and keep only build-host
+        # paths. grep exits non-zero (no match) for a clean binary, which is
+        # the common case, so fall through to the next file.
+        deps=$(otool -L "${f}" 2>/dev/null | tail -n +2 | awk '{print $1}' | \
+            grep -E "^(${PREFIXES})") || continue
+        echo "ERROR: ${f} links against build-host libraries:" >&2
+        echo "${deps}" | sed 's/^/    /' >&2
+        found="yes"
+    done < <(find "${BUNDLE_DIR}" -type f -exec file "{}" \; | \
+        grep -v "(for architecture" | \
+        grep -E "Mach-O executable|Mach-O 64-bit executable|Mach-O 64-bit bundle|Mach-O 64-bit dynamically linked shared library" | \
+        awk -F":" '{print $1}' | uniq)
+
+    if [ -n "${found}" ]; then
+        echo "ERROR: the bundle links against libraries outside it; those paths" >&2
+        echo "       will not exist (or will fail library validation) on end-user" >&2
+        echo "       machines and the app will not start. See issue #10123." >&2
+        echo "       Ensure the affected module links the bundled OpenSSL, e.g." >&2
+        echo "       set OPENSSL_DIR (and OPENSSL_STATIC) for the cryptography" >&2
+        echo "       build so openssl-sys does not pick up Homebrew's copy." >&2
+        exit 1
+    fi
+    echo "Bundle library references OK."
 }
 
 _generate_sbom() {
@@ -485,7 +688,12 @@ _notarize_pkg() {
         awk -F ': ' '/status:/ { print $2; }')
 
     if [[ "${REQUEST_STATUS}" != "Accepted" ]]; then
-        echo "Notarization failed."
+        echo "Notarization failed with status: ${REQUEST_STATUS}"
+        echo "Fetching notary log for details..."
+        xcrun notarytool log "${SUBMISSION_ID}" \
+            --team-id "${DEVELOPER_TEAM_ID}" \
+            --apple-id "${DEVELOPER_USER}" \
+            --password "${DEVELOPER_ASP}"
         exit 1
     fi
 
