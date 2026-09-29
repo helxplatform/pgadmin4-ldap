@@ -203,7 +203,7 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
 
 COPY --from=env-builder /venv /venv
 
-RUN /venv/bin/pip install psycopg[binary,pool] gunicorn==20.1.0 && \
+RUN /venv/bin/pip install psycopg[binary,pool] gunicorn==23.0.0 && \
     rm -rf /var/lib/apt/lists/*
 
 RUN mkdir -p /run/pgadmin /var/lib/pgadmin && \
