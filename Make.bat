@@ -52,7 +52,7 @@ REM Main build sequence Ends
 
 :SET_ENVIRONMENT
     ECHO Configuring the environment...
-    IF "%PGADMIN_PYTHON_DIR%" == ""   SET "PGADMIN_PYTHON_DIR=C:\Python313"
+    IF "%PGADMIN_PYTHON_DIR%" == ""   SET "PGADMIN_PYTHON_DIR=C:\Python314"
     IF "%PGADMIN_KRB5_DIR%" == ""     SET "PGADMIN_KRB5_DIR=C:\Program Files\MIT\Kerberos"
     IF "%PGADMIN_POSTGRES_DIR%" == "" SET "PGADMIN_POSTGRES_DIR=C:\Program Files\PostgreSQL\17"
     IF "%PGADMIN_INNOTOOL_DIR%" == "" SET "PGADMIN_INNOTOOL_DIR=C:\Program Files (x86)\Inno Setup 6"
@@ -161,10 +161,14 @@ REM Main build sequence Ends
     CD "%TMPDIR%"
 
     REM Note that we must use virtualenv.exe here, as the venv module doesn't allow python.exe to relocate.
-    "%PGADMIN_PYTHON_DIR%\Scripts\virtualenv.exe" venv
+    "%PGADMIN_PYTHON_DIR%\Scripts\virtualenv.exe" venv || EXIT /B 1
 
     XCOPY /S /I /E /H /Y "%PGADMIN_PYTHON_DIR%\DLLs" "%TMPDIR%\venv\DLLs" > nul || EXIT /B 1
-    XCOPY /S /I /E /H /Y "%PGADMIN_PYTHON_DIR%\Lib" "%TMPDIR%\venv\Lib" > nul || EXIT /B 1
+    REM Copy the standard library, but NOT site-packages: the venv already has its
+    REM own seeded pip there, and overwriting only the files the system Python also
+    REM has leaves a mix of two pip versions behind.
+    ROBOCOPY /E /R:3 /W:5 /NFL /NDL /NP "%PGADMIN_PYTHON_DIR%\Lib" "%TMPDIR%\venv\Lib" /XD site-packages
+    CALL :CHECK_ROBOCOPY_ERROR || EXIT /B 1
 
     ECHO Activating virtual environment -  %TMPDIR%\venv...
     CALL "%TMPDIR%\venv\Scripts\activate" || EXIT /B 1
@@ -216,13 +220,18 @@ REM Main build sequence Ends
     RD /Q /S "%WD%\web\pgadmin\static\js\generated\.cache" 1> nul 2>&1
 
     ECHO Copying web directory...
-    ROBOCOPY /S "%WD%\web" "%BUILDROOT%\web" > nul
-    CALL :CHECK_ROBOCOPY_ERROR
+    ROBOCOPY /S /NFL /NDL /NP "%WD%\web" "%BUILDROOT%\web"
+    CALL :CHECK_ROBOCOPY_ERROR || EXIT /B 1
 
     ECHO Installing javascript dependencies...
     CD "%BUILDROOT%\web"
-    CALL yarn set version berry || EXIT /B 1
-    CALL yarn set version 4 || EXIT /B 1
+    SET "YARN_VERSION="
+    FOR /f "delims=" %%v IN ('node -p "require('./package.json').packageManager.split('@')[1]"') DO SET "YARN_VERSION=%%v"
+    IF "%YARN_VERSION%"=="" (
+        ECHO ERROR: Could not determine Yarn version from package.json packageManager field.
+        EXIT /B 1
+    )
+    CALL yarn set version %YARN_VERSION% || EXIT /B 1
     CALL yarn install || EXIT /B 1
     CALL npm rebuild || EXIT /B 1
 
@@ -237,8 +246,18 @@ REM Main build sequence Ends
     RD /Q /S "%BUILDROOT%\web\regression" 1> nul 2>&1
     ECHO Removing tools...
     RD /Q /S "%BUILDROOT%\web\tools" 1> nul 2>&1
-    ECHO Removing yarn cache...
+    ECHO Removing the JavaScript build configuration...
     RD /Q /S "%BUILDROOT%\web\.yarn" 1> nul 2>&1
+    DEL /q "%BUILDROOT%\web\yarn.lock" 1> nul 2>&1
+    DEL /q "%BUILDROOT%\web\.yarnrc.yml" 1> nul 2>&1
+    DEL /q "%BUILDROOT%\web\package.json" 1> nul 2>&1
+    DEL /q "%BUILDROOT%\web\jest.config.js" 1> nul 2>&1
+    DEL /q "%BUILDROOT%\web\babel.cfg" 1> nul 2>&1
+    DEL /q "%BUILDROOT%\web\babel.config.json" 1> nul 2>&1
+    DEL /q "%BUILDROOT%\web\webpack.config.js" 1> nul 2>&1
+    DEL /q "%BUILDROOT%\web\webpack.shim.js" 1> nul 2>&1
+    DEL /q "%BUILDROOT%\web\.eslintrc.js" 1> nul 2>&1
+    DEL /q "%BUILDROOT%\web\.editorconfig" 1> nul 2>&1
     ECHO Removing any existing configurations...
     DEL /q "%BUILDROOT%\web\pgadmin4.db" 1> nul 2>&1
     DEL /q "%BUILDROOT%\web\config_local.py" 1> nul 2>&1
@@ -276,8 +295,13 @@ REM Main build sequence Ends
 
     CD "%BUILDROOT%\runtime\resources\app\"
 
-    CALL yarn set version berry || EXIT /B 1
-    CALL yarn set version 4 || EXIT /B 1
+    SET "YARN_VERSION="
+    FOR /f "delims=" %%v IN ('node -p "require('./package.json').packageManager.split('@')[1]"') DO SET "YARN_VERSION=%%v"
+    IF "%YARN_VERSION%"=="" (
+        ECHO ERROR: Could not determine Yarn version from package.json packageManager field.
+        EXIT /B 1
+    )
+    CALL yarn set version %YARN_VERSION% || EXIT /B 1
     CALL yarn workspaces focus --production || EXIT /B 1
 
     ECHO Removing yarn cache...
@@ -310,7 +334,7 @@ REM Main build sequence Ends
     %TMPDIR%\rcedit-x64.exe "%BUILDROOT%\runtime\pgAdmin4.exe" --set-icon "%WD%\pkg\win32\Resources\pgAdmin4.ico"
     %TMPDIR%\rcedit-x64.exe "%BUILDROOT%\runtime\pgAdmin4.exe" --set-version-string "FileDescription" "%APP_NAME%"
     %TMPDIR%\rcedit-x64.exe "%BUILDROOT%\runtime\pgAdmin4.exe" --set-version-string "ProductName" "%APP_NAME%"
-    %TMPDIR%\rcedit-x64.exe "%BUILDROOT%\runtime\pgAdmin4.exe" --set-product-version "%APP_VERSION%""
+    %TMPDIR%\rcedit-x64.exe "%BUILDROOT%\runtime\pgAdmin4.exe" --set-product-version "%APP_VERSION%"
 
     IF NOT "%PGADMIN_WINDOWS_CSC%" == "" (
         ECHO Attempting to sign the pgAdmin4.exe...

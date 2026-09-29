@@ -479,6 +479,23 @@ define('pgadmin.browser.node', [
                     'pgadmin:browser:node:' + _newNodeData._type + ':updated',
                     _item, _newNodeData, _oldNodeData
                   );
+
+                  // Trigger a specific event for server color updates
+                  // This allows tabs to update their color indicators when server colors change
+                  if (_newNodeData._type === 'server') {
+                    // Extract colors from the icon string using getServerColors utility
+                    const newColors = commonUtils.getServerColors(_newNodeData?.icon);
+
+                    pgBrowser.Events.trigger(
+                      'pgadmin:server:colors:updated',
+                      _newNodeData._id,
+                      {
+                        bgcolor: newColors.bgcolor,
+                        fgcolor: newColors.fgcolor,
+                        icon: _newNodeData.icon
+                      }
+                    );
+                  }
                 },
               }
             );
@@ -549,7 +566,7 @@ define('pgadmin.browser.node', [
 
           if (!(_.isFunction(obj.canDropCascade) ?
             obj.canDropCascade(d, i) : obj.canDropCascade)) {
-            pgAdmin.Browser.notifier.error(
+            pgAdmin.Browser.notifier.errorText(
               gettext('The %s "%s" cannot be dropped.', obj.label, d.label),
               10000
             );
@@ -566,7 +583,7 @@ define('pgadmin.browser.node', [
 
           if (!(_.isFunction(obj.canDrop) ?
             obj.canDrop(d, i) : obj.canDrop)) {
-            pgAdmin.Browser.notifier.error(
+            pgAdmin.Browser.notifier.errorText(
               gettext('The %s "%s" cannot be dropped/removed.', obj.label, d.label),
               10000
             );
@@ -579,11 +596,11 @@ define('pgadmin.browser.node', [
               obj.generate_url(i, input.url, d, true),
             ).then(({data: res})=> {
               if(res.success == 2){
-                pgAdmin.Browser.notifier.error(res.info, null);
+                pgAdmin.Browser.notifier.errorText(res.info, null);
                 return;
               }
               if (res.success == 0) {
-                pgAdmin.Browser.notifier.alert(res.errormsg, res.info);
+                pgAdmin.Browser.notifier.alertText(res.errormsg, res.info);
               } else {
                 // Remove the node from tree and set collection node as selected.
                 let selectNextNode = true;
@@ -613,7 +630,7 @@ define('pgadmin.browser.node', [
                   console.warn(e.stack || e);
                 }
               }
-              pgAdmin.Browser.notifier.alert(gettext('Error dropping/removing %s: "%s"', obj.label, objName), errmsg);
+              pgAdmin.Browser.notifier.alertText(gettext('Error dropping/removing %s: "%s"', obj.label, objName), errmsg);
             });
           },
           () => {},
@@ -708,9 +725,8 @@ define('pgadmin.browser.node', [
 
         // Go further only if node type is a Server
         if (index !== -1) {
-          // First element will be icon and second will be colour code
-          let bgcolor = serverData.icon.split(' ')[1] || null,
-            fgcolor = serverData.icon.split(' ')[2] || '';
+          // Extract bgcolor and fgcolor from server icon
+          const { bgcolor, fgcolor } = commonUtils.getServerColors(serverData.icon);
 
           if (bgcolor) {
             let dynamic_class = 'pga_server_' + serverData._id + '_bgcolor';
@@ -725,8 +741,12 @@ define('pgadmin.browser.node', [
                 background: ${bgcolor} !important;
               }
               ${fgcolor ? `
-              .${dynamic_class} span.file-name, .${dynamic_class} span.file-name:hover, .${dynamic_class} span.file-name.pseudo-active {
+              .${dynamic_class} span.file-name, .${dynamic_class} span.file-name:hover, .${dynamic_class} span.file-name.pseudo-active,
+              .${dynamic_class} span.children-count {
                 color: ${fgcolor} !important;
+              }
+              .${dynamic_class} span.text-muted {
+                color: color-mix(in srgb, ${fgcolor} 65%, transparent) !important;
               }
               `:''}
             `;

@@ -47,19 +47,39 @@ Use the fields on the *AI* panel to configure your LLM provider:
 
 **Anthropic Settings:**
 
+* Use the *API URL* field to set a custom API endpoint URL. Leave empty to use
+  the default Anthropic API (``https://api.anthropic.com/v1``). Set a custom URL
+  to use an Anthropic-compatible API provider.
+
 * Use the *API Key File* field to specify the path to a file containing your
-  Anthropic API key.
+  Anthropic API key. This path refers to the filesystem where the pgAdmin
+  server is running (e.g., inside the container if using Docker). The ``~``
+  prefix is expanded to the home directory of the user running the pgAdmin
+  server process. The API key may be optional when using a custom API URL
+  with a provider that does not require authentication.
 
 * Use the *Model* field to select from the available Claude models. Click the
-  refresh button to fetch the latest available models from Anthropic.
+  refresh button to fetch the latest available models from your configured
+  endpoint.
 
 **OpenAI Settings:**
 
+* Use the *API URL* field to set a custom API endpoint URL. Leave empty to use
+  the default OpenAI API (``https://api.openai.com/v1``). Set a custom URL to
+  use any OpenAI-compatible API provider (e.g., LiteLLM, LM Studio, EXO).
+  Include the ``/v1`` path prefix if required by your provider
+  (e.g., ``http://localhost:1234/v1``).
+
 * Use the *API Key File* field to specify the path to a file containing your
-  OpenAI API key.
+  OpenAI API key. This path refers to the filesystem where the pgAdmin
+  server is running (e.g., inside the container if using Docker). The ``~``
+  prefix is expanded to the home directory of the user running the pgAdmin
+  server process. The API key may be optional when using a custom API URL
+  with a provider that does not require authentication.
 
 * Use the *Model* field to select from the available GPT models. Click the
-  refresh button to fetch the latest available models from OpenAI.
+  refresh button to fetch the latest available models from your configured
+  endpoint.
 
 **Ollama Settings:**
 
@@ -78,6 +98,11 @@ Use the fields on the *AI* panel to configure your LLM provider:
 * Use the *Model* field to select from the available models or enter a custom
   model name. Click the refresh button to fetch the latest available models
   from your Docker Model Runner.
+
+.. note:: You can also use the *OpenAI* provider with a custom API URL for any
+   OpenAI-compatible endpoint, including Docker Model Runner, LM Studio, EXO,
+   and other local inference servers. This can be useful when you want to use
+   a provider that isn't explicitly listed but supports the OpenAI API format.
 
 The Browser Node
 ****************
@@ -609,6 +634,39 @@ a graphical EXPLAIN.
 
 * When the *Verbose output?* switch is set to *True*, graphical explain details
   will include extended information about the query execution plan.
+
+Use the fields on the *Geometry Viewer* panel to configure a custom map tile
+provider used as a base layer when viewing geometry data.
+
+* Use the *Custom tile provider URL* field to specify the URL template of a
+  custom XYZ tile provider, e.g.
+  ``https://myserver.example.com/tiles/{z}/{x}/{y}.png``. The template must
+  contain the ``{x}``, ``{y}`` and ``{z}`` placeholders, and may contain
+  ``{s}`` for subdomains (a, b, c). Leave the field empty to disable the
+  custom tile provider.
+
+* Use the *Custom tile provider name* field to specify the display name of
+  the custom tile provider in the layer selector of the Geometry Viewer.
+
+* Use the *Custom tile provider CRS* field to specify the coordinate
+  reference system of the custom tile provider. If it is not EPSG:3857
+  (Web Mercator), the built-in tile layers will be hidden as they cannot be
+  mixed with other coordinate systems.
+
+* Use the *Custom tile provider attribution* field to specify the
+  attribution text shown on the map. It may contain HTML links.
+
+* Use the *Custom tile provider max zoom* field to specify the maximum zoom
+  level of the custom tile provider.
+
+When a custom tile provider is configured, it is selected as the default
+base layer of the Geometry Viewer.
+
+An administrator may set a system-wide default for these fields via the
+``DEFAULT_GEOMETRY_VIEWER_PROVIDER`` setting in :ref:`config_py`. It applies
+to any user who has not saved their own values for the fields above; a
+user's own preferences, once saved, always take precedence over the
+system-wide default.
 
 .. image:: images/preferences_graph_visualiser.png
     :alt: Preferences sqleditor graph visualiser section

@@ -9,13 +9,11 @@ CREATE TABLE IF NOT EXISTS public."table_like_tbl$%{}[]()&*^!@""'`\/#"
     CONSTRAINT "table_like_tbl$%{}[]()&*^!@""'`\/#_pkey" PRIMARY KEY (id),
     CONSTRAINT "table_like_tbl$%{}[]()&*^!@""'`\/#_name_key" UNIQUE (name)
 )
-WITH (
-    OIDS = FALSE
-)
+
 TABLESPACE pg_default;
 
 ALTER TABLE IF EXISTS public."table_like_tbl$%{}[]()&*^!@""'`\/#"
-    OWNER to postgres;
+    OWNER to <OWNER>;
 
 COMMENT ON TABLE public."table_like_tbl$%{}[]()&*^!@""'`\/#"
     IS 'test ';

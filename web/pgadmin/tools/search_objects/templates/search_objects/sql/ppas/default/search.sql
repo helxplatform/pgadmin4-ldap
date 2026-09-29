@@ -109,7 +109,7 @@ FROM (
     JOIN pg_catalog.pg_class cls ON cls.oid=indexrelid
     JOIN pg_catalog.pg_class tab ON tab.oid=indrelid
     JOIN pg_catalog.pg_namespace n ON n.oid=tab.relnamespace
-    LEFT JOIN pg_catalog.pg_depend dep ON (dep.classid = cls.tableoid AND dep.objid = cls.oid AND dep.refobjsubid = '0' AND dep.refclassid=(SELECT oid FROM pg_catalog.pg_class WHERE relname='pg_constraint') AND dep.deptype='i')
+    LEFT JOIN pg_catalog.pg_depend dep ON (dep.classid = cls.tableoid AND dep.objid = cls.oid AND dep.refobjsubid = '0' AND dep.refclassid='pg_catalog.pg_constraint'::regclass AND dep.deptype='i')
     LEFT OUTER JOIN pg_catalog.pg_constraint con ON (con.tableoid = dep.refclassid AND con.oid = dep.refobjid)
     LEFT OUTER JOIN pg_catalog.pg_description des ON des.objoid=cls.oid
     LEFT OUTER JOIN pg_catalog.pg_description desp ON (desp.objoid=con.oid AND desp.objsubid = 0)
@@ -164,7 +164,7 @@ FROM (
         ON t.oid = pr.prorettype left JOIN pg_catalog.pg_language l
         ON l.oid = pr.prolang
         WHERE NOT (t.typname = 'trigger' AND l.lanname = 'edbspl')
-        AND ({{ CATALOGS.DB_SUPPORT('n') }} AND {{ CATALOGS.DB_SUPPORT('np') }}) AND NOT pr.proisagg
+        AND ({{ CATALOGS.DB_SUPPORT('n') }} AND {{ CATALOGS.DB_SUPPORT('np') }}) AND pr.prokind != 'a'
     ) fd
     {% if not all_obj %}
     WHERE fd.obj_type = '{{ obj_type }}'
@@ -297,11 +297,12 @@ FROM (
 {% if all_obj %}
     UNION
 {% endif %}
-{% if all_obj or obj_type in ['trigger'] %}
-    select 'trigger'::text AS obj_type, tr.tgname AS obj_name, ':schema.'||n.oid||':/' || n.nspname|| '/' ||
+{% if all_obj or obj_type in ['trigger', 'compound_trigger'] %}
+    select
+        CASE WHEN tr.tgpackageoid != 0 THEN 'compound_trigger' ELSE 'trigger' END::text AS obj_type, tr.tgname AS obj_name,
+        ':schema.'||n.oid||':/' || n.nspname|| '/' ||
         case
             when t.relkind = 'v' then ':view.' || t.oid || ':' || '/' || t.relname
-            when t.relkind = 'm' then ':mview.' || t.oid || ':' || '/' || t.relname
             WHEN t.relkind in ('r', 't', 'p') THEN
             (
                 WITH RECURSIVE table_path_data as (
@@ -318,13 +319,19 @@ FROM (
                 select CASE WHEN relkind = 'p' THEN path ELSE ':table.' || t.oid || ':/' || t.relname END AS path
                 from table_path_data order by height desc limit 1
             )
-        end || '/:trigger.'|| tr.oid || ':/' || tr.tgname AS obj_path, n.nspname AS schema_name,
-        {{ show_node_prefs['trigger'] }} AS show_node, NULL AS other_info
+        end || CASE WHEN tr.tgpackageoid != 0 THEN '/:compound_trigger.' ELSE '/:trigger.' END || tr.oid || ':/' || tr.tgname AS obj_path, n.nspname AS schema_name,
+        CASE WHEN tr.tgpackageoid != 0 THEN {{ show_node_prefs['compound_trigger'] }} ELSE {{ show_node_prefs['trigger'] }} END AS show_node,
+        NULL AS other_info
         from pg_catalog.pg_trigger tr
     inner join pg_catalog.pg_class t on tr.tgrelid = t.oid and t.relkind in ('r', 't', 'p', 'v')
     left join pg_catalog.pg_namespace n on t.relnamespace = n.oid
     where tr.tgisinternal = false
     and {{ CATALOGS.DB_SUPPORT('n') }}
+    {% if obj_type == 'compound_trigger' %}
+    AND tr.tgpackageoid != 0
+    {% elif obj_type == 'trigger' %}
+    AND tr.tgpackageoid = 0
+    {% endif %}
 {% endif %}
 {% if all_obj %}
     UNION
@@ -501,7 +508,7 @@ FROM (
     {{ show_node_prefs['extension'] }} AS show_node, NULL AS other_info
     FROM pg_catalog.pg_extension x
     JOIN pg_catalog.pg_namespace n on x.extnamespace=n.oid
-    join pg_catalog.pg_available_extensions() e(name, default_version, comment) ON x.extname=e.name
+    join pg_catalog.pg_available_extensions() e ON x.extname=e.name
 {% endif %}
 {% if all_obj %}
     UNION
@@ -531,7 +538,8 @@ FROM (
     {{ show_node_prefs['package'] }} AS show_node, NULL AS other_info
     FROM pg_catalog.pg_namespace p
     JOIN pg_catalog.pg_namespace n ON n.oid=p.nspparent
-    WHERE {{ CATALOGS.DB_SUPPORT('n') }}
+    WHERE p.nspcompoundtrigger = false
+    AND {{ CATALOGS.DB_SUPPORT('n') }}
 {% endif %}
 {% if all_obj %}
     UNION
@@ -543,7 +551,8 @@ FROM (
     FROM pg_catalog.edb_variable v JOIN pg_catalog.pg_namespace p
     ON v.varpackage = p.oid JOIN pg_catalog.pg_namespace n
     ON p.nspparent = n.oid
-    WHERE {{ CATALOGS.DB_SUPPORT('p') }}
+    WHERE p.nspcompoundtrigger = false
+    AND {{ CATALOGS.DB_SUPPORT('p') }}
     AND {{ CATALOGS.DB_SUPPORT('n') }}
 {% endif %}
 {% if all_obj %}
@@ -585,7 +594,7 @@ FROM (
     ':schema.'|| ns.oid || ':/' || ns.nspname || '/' || ':aggregate.' || ag.aggfnoid::oid ||':/' || pr.proname AS obj_path,
     ns.nspname AS schema_name,
     {{ show_node_prefs['aggregate'] }} AS show_node, pg_catalog.pg_get_function_arguments(aggfnoid::oid) AS other_info
-    FROM pg_aggregate ag
+    FROM pg_catalog.pg_aggregate ag
     LEFT OUTER JOIN pg_catalog.pg_proc pr ON pr.oid = ag.aggfnoid
     LEFT OUTER JOIN pg_catalog.pg_namespace ns ON ns.oid=pr.pronamespace
     WHERE ({{ CATALOGS.DB_SUPPORT('ns') }})

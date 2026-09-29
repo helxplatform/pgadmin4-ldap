@@ -7,7 +7,7 @@
 //
 //////////////////////////////////////////////////////////////
 
-import { useState, useContext, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import { Box } from '@mui/material';
 import { styled } from '@mui/material/styles';
 import { InputSelect, FormInput } from './FormComponents';
@@ -18,7 +18,6 @@ import { PgIconButton } from './Buttons';
 import getApiInstance from '../api_instance';
 import url_for from 'sources/url_for';
 import gettext from 'sources/gettext';
-import { SchemaStateContext } from '../SchemaView/SchemaState';
 import { usePgAdmin } from '../PgAdminProvider';
 import { clearOptionsCache } from '../../../preferences/static/js/components/PreferencesHelper';
 
@@ -62,33 +61,51 @@ ChildContent.propTypes = {
   isRefreshing: PropTypes.bool,
 };
 
-export function SelectRefresh({ required, className, label, helpMessage, testcid, controlProps, ...props }) {
+export function SelectRefresh({ required, className, label, helpMessage, testcid, controlProps, options: fieldOptions, optionsReloadBasis: fieldReloadBasis, onChange, ...props }) {
   const [optionsState, setOptionsState] = useState({ options: [], reloadBasis: 0 });
   const [isRefreshing, setIsRefreshing] = useState(false);
-  const schemaState = useContext(SchemaStateContext);
   const pgAdmin = usePgAdmin();
   const {
     getOptionsOnRefresh,
     optionsRefreshUrl,
     optionsUrl,
-    refreshDeps,
+    refreshDeps: _refreshDeps,
+    currentDepValues,
+    depChangeEmitter,
     ...selectControlProps
   } = controlProps;
 
+  // Listen for blur-based changes on dependency fields.
+  // When a dep field (e.g., API URL, API key file) loses focus
+  // with a changed value, the emitter fires 'depchange' and we
+  // clear the cached options, model list, and selected value.
+  useEffect(() => {
+    if (!depChangeEmitter) return;
+    const handler = () => {
+      if (optionsUrl) {
+        clearOptionsCache(optionsUrl);
+      }
+      setOptionsState((prev) => ({ options: [], reloadBasis: prev.reloadBasis + 1 }));
+      onChange?.('');
+    };
+    depChangeEmitter.addEventListener('depchange', handler);
+    return () => depChangeEmitter.removeEventListener('depchange', handler);
+  }, [depChangeEmitter, optionsUrl, onChange]);
+
   const onRefreshClick = useCallback(() => {
     // If we have an optionsRefreshUrl, make a POST request with dependent field values
-    if (optionsRefreshUrl && refreshDeps && schemaState) {
+    if (optionsRefreshUrl) {
       setIsRefreshing(true);
 
-      // Build the request body from dependent field values
+      // Build the request body from current dependency values.
+      // currentDepValues contains the live unsaved form values,
+      // keyed by param name (e.g., { api_url: '...', api_key_file: '...' }).
       const requestBody = {};
-      for (const [paramName, fieldId] of Object.entries(refreshDeps)) {
-        // Find the field value from schema state
-        // fieldId is the preference ID, we need to look it up in state
-        const fieldValue = schemaState.data?.[fieldId];
-        // Only include non-empty values
-        if (fieldValue !== undefined && fieldValue !== null && fieldValue !== '') {
-          requestBody[paramName] = fieldValue;
+      if (currentDepValues) {
+        for (const [paramName, fieldValue] of Object.entries(currentDepValues)) {
+          if (fieldValue !== undefined && fieldValue !== null && fieldValue !== '') {
+            requestBody[paramName] = fieldValue;
+          }
         }
       }
 
@@ -100,7 +117,7 @@ export function SelectRefresh({ required, className, label, helpMessage, testcid
           if (res.data?.data?.error) {
             // Server returned an error message - clear options and show error
             setOptionsState((prev) => ({ options: [], reloadBasis: prev.reloadBasis + 1 }));
-            pgAdmin.Browser.notifier.error(res.data.data.error);
+            pgAdmin.Browser.notifier.errorText(res.data.data.error);
           } else if (res.data?.data?.models) {
             const models = res.data.data.models;
             // Clear the cache so next time preferences opens, it uses the refreshed data
@@ -117,7 +134,7 @@ export function SelectRefresh({ required, className, label, helpMessage, testcid
           // Network or other error - clear options and show error
           setOptionsState((prev) => ({ options: [], reloadBasis: prev.reloadBasis + 1 }));
           const errMsg = err.response?.data?.errormsg || err.message || gettext('Failed to refresh models');
-          pgAdmin.Browser.notifier.error(errMsg);
+          pgAdmin.Browser.notifier.errorText(errMsg);
         })
         .finally(() => {
           setIsRefreshing(false);
@@ -132,23 +149,31 @@ export function SelectRefresh({ required, className, label, helpMessage, testcid
         .catch((err) => {
           setOptionsState((prev) => ({ options: [], reloadBasis: prev.reloadBasis + 1 }));
           const errMsg = err.message || gettext('Failed to refresh options');
-          pgAdmin.Browser.notifier.error(errMsg);
+          pgAdmin.Browser.notifier.errorText(errMsg);
         })
         .finally(() => {
           setIsRefreshing(false);
         });
     }
-  }, [optionsRefreshUrl, optionsUrl, refreshDeps, schemaState, getOptionsOnRefresh, pgAdmin]);
+  }, [optionsRefreshUrl, optionsUrl, currentDepValues, getOptionsOnRefresh, pgAdmin]);
+
+  // Use field options (from GET endpoint) until the user refreshes
+  // or deps change, at which point optionsState takes over.
+  const activeOptions = optionsState.reloadBasis > 0
+    ? optionsState.options : fieldOptions;
+  const activeReloadBasis = optionsState.reloadBasis > 0
+    ? optionsState.reloadBasis : fieldReloadBasis;
 
   return (
     <FormInput required={required} label={label} className={className} helpMessage={helpMessage} testcid={testcid}>
       <ChildContent
-        options={optionsState.options}
-        optionsReloadBasis={optionsState.reloadBasis}
         onRefreshClick={onRefreshClick}
         controlProps={selectControlProps}
         isRefreshing={isRefreshing}
+        onChange={onChange}
         {...props}
+        options={activeOptions}
+        optionsReloadBasis={activeReloadBasis}
       />
     </FormInput>
   );

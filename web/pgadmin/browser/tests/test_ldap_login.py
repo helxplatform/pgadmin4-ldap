@@ -8,6 +8,7 @@
 ##########################################################################
 
 import config as app_config
+from pgAdmin4 import app
 from pgadmin.utils.route import BaseTestGenerator
 from regression.python_test_utils import test_utils as utils
 from regression.test_setup import config_data
@@ -51,6 +52,13 @@ class LDAPLoginTestCase(BaseTestGenerator):
             ldap_config = config_data['ldap_config'][0][self.config_key_param]
         except (KeyError, TypeError, IndexError):
             self.skipTest("LDAP config not set.")
+        # Skip when the LDAP config is just the template placeholders
+        # (no real LDAP server reachable for the test).
+        if 'IP-ADDRESS' in ldap_config.get('uri', '') or \
+                ldap_config.get('base_dn') in ('', 'BASE-DN'):
+            self.skipTest(
+                "LDAP config is template placeholders — no live LDAP "
+                "server configured for this dev env.")
         app_config.AUTHENTICATION_SOURCES = [LDAP]
         app_config.LDAP_AUTO_CREATE_USER = True
         app_config.LDAP_SERVER_URI = ldap_config['uri']
@@ -96,4 +104,5 @@ class LDAPLoginTestCase(BaseTestGenerator):
         cls.tester.logout()
         app_config.AUTHENTICATION_SOURCES = [INTERNAL]
         app_config.PGADMIN_EXTERNAL_AUTH_SOURCE = INTERNAL
+        app.PGADMIN_EXTERNAL_AUTH_SOURCE = INTERNAL
         utils.login_tester_account(cls.tester)

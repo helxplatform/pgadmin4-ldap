@@ -7,8 +7,8 @@ CREATE TABLE IF NOT EXISTS public."table_with_custom_autovaccum_$%{}[]()&*^!@""'
     col1 character varying(10)[] COLLATE pg_catalog."default",
     col2 date
 )
+
 WITH (
-    OIDS = FALSE,
     toast.autovacuum_enabled = FALSE,
     autovacuum_analyze_scale_factor = 0.2,
     autovacuum_analyze_threshold = 60,
@@ -27,7 +27,7 @@ WITH (
 TABLESPACE pg_default;
 
 ALTER TABLE IF EXISTS public."table_with_custom_autovaccum_$%{}[]()&*^!@""'`\/#"
-    OWNER to postgres;
+    OWNER to <OWNER>;
 
 COMMENT ON TABLE public."table_with_custom_autovaccum_$%{}[]()&*^!@""'`\/#"
     IS 'custom auto vacuum';

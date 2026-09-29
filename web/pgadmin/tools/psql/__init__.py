@@ -20,15 +20,18 @@ from flask import Response, request
 from flask import render_template, copy_current_request_context, \
     current_app as app
 from flask_babel import gettext
-from flask_security import current_user
+from flask_security import current_user, permissions_required
 from pgadmin.user_login_check import pga_login_required
 from pgadmin.browser.utils import underscore_unescape, underscore_escape
 from pgadmin.utils import PgAdminModule
 from pgadmin.utils.driver import get_driver
 from ... import socketio as sio
 from pgadmin.utils import get_complete_file_path
-from pgadmin.authenticate import socket_login_required
+from pgadmin.authenticate import socket_login_required, \
+    socket_permissions_required
 from pgadmin.model import Server
+from pgadmin.utils.server_access import get_server
+from pgadmin.tools.user_management.PgAdminPermissions import AllPermissionTypes
 
 if _platform == 'win32':
     # Check Windows platform support for WinPty api, Disable psql
@@ -75,6 +78,7 @@ blueprint = PSQLModule('psql', __name__, static_url_path='/static')
 @blueprint.route('/panel/<int:trans_id>',
                  methods=["POST"],
                  endpoint="panel")
+@permissions_required(AllPermissionTypes.tools_psql_tool)
 @pga_login_required
 def panel(trans_id):
     """
@@ -98,7 +102,7 @@ def panel(trans_id):
     if 'sid_soid_mapping' not in app.config:
         app.config['sid_soid_mapping'] = dict()
 
-    s = Server.query.filter_by(id=int(params['sid'])).first()
+    s = get_server(int(params['sid']))
     if s:
         data = _get_database_role(params['sid'], params['did'])
         if data:
@@ -291,7 +295,7 @@ def pty_handel_io(connection_data, data, sid):
 
 
 @sio.on('start_process', namespace='/pty')
-@socket_login_required
+@socket_permissions_required(AllPermissionTypes.tools_psql_tool)
 def start_process(data):
     """
     Start the pty terminal and execute psql command and emit results to user.
@@ -474,6 +478,7 @@ def other_key_press(data):
 
 
 @sio.on('socket_input', namespace='/pty')
+@socket_permissions_required(AllPermissionTypes.tools_psql_tool)
 def socket_input(data):
     """
     This get the user input through socket.
@@ -502,6 +507,7 @@ def socket_input(data):
 
 
 @sio.on('socket_set_role', namespace='/pty')
+@socket_permissions_required(AllPermissionTypes.tools_psql_tool)
 def socket_set_role(data):
     """
     This function sets the role used to connect to server.
@@ -536,6 +542,7 @@ def socket_set_role(data):
 
 
 @sio.on('resize', namespace='/pty')
+@socket_permissions_required(AllPermissionTypes.tools_psql_tool)
 def resize(data):
     """
     Resize the pty terminal as per the UI terminal.

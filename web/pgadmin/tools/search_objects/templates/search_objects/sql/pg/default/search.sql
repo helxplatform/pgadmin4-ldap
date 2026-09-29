@@ -109,7 +109,7 @@ FROM (
     JOIN pg_catalog.pg_class cls ON cls.oid=indexrelid
     JOIN pg_catalog.pg_class tab ON tab.oid=indrelid
     JOIN pg_catalog.pg_namespace n ON n.oid=tab.relnamespace
-    LEFT JOIN pg_catalog.pg_depend dep ON (dep.classid = cls.tableoid AND dep.objid = cls.oid AND dep.refobjsubid = '0' AND dep.refclassid=(SELECT oid FROM pg_catalog.pg_class WHERE relname='pg_constraint') AND dep.deptype='i')
+    LEFT JOIN pg_catalog.pg_depend dep ON (dep.classid = cls.tableoid AND dep.objid = cls.oid AND dep.refobjsubid = '0' AND dep.refclassid='pg_catalog.pg_constraint'::regclass AND dep.deptype='i')
     LEFT OUTER JOIN pg_catalog.pg_constraint con ON (con.tableoid = dep.refclassid AND con.oid = dep.refobjid)
     LEFT OUTER JOIN pg_catalog.pg_description des ON des.objoid=cls.oid
     LEFT OUTER JOIN pg_catalog.pg_description desp ON (desp.objoid=con.oid AND desp.objsubid = 0)
@@ -119,18 +119,35 @@ FROM (
 {% if all_obj %}
     UNION
 {% endif %}
-{% if all_obj or obj_type in ['trigger_function', 'function'] %}
+{% if all_obj or obj_type in ['trigger_function', 'function', 'procedure'] %}
     SELECT
         CASE
-        WHEN t.typname IN ('trigger', 'event_trigger') THEN 'trigger_function'
-        ELSE 'function' END::text AS obj_type, p.proname AS obj_name,
-    ':schema.'|| n.oid || ':/' || n.nspname || '/' || case when t.typname = 'trigger' then ':trigger_function.' else ':function.' end || p.oid ||':/' || p.proname AS obj_path, n.nspname AS schema_name,
-    CASE WHEN t.typname IN ('trigger', 'event_trigger') THEN {{ show_node_prefs['trigger_function'] }} ELSE {{ show_node_prefs['function'] }} END AS show_node,
-    pg_catalog.pg_get_function_identity_arguments(p.oid) AS other_info
-    from pg_catalog.pg_proc p
-    left join pg_catalog.pg_namespace n on p.pronamespace = n.oid
-    left join pg_catalog.pg_type t on p.prorettype = t.oid
-    WHERE ({{ CATALOGS.DB_SUPPORT('n') }}) AND NOT p.proisagg
+            WHEN t.typname IN ('trigger', 'event_trigger') THEN 'trigger_function'
+            WHEN p.prokind = 'p' THEN 'procedure'
+            ELSE 'function'
+        END::text AS obj_type, p.proname AS obj_name,
+        ':schema.'|| n.oid || ':/' || n.nspname || '/' ||
+        CASE
+            WHEN t.typname IN ('trigger', 'event_trigger') THEN ':trigger_function.'
+            WHEN p.prokind = 'p' THEN ':procedure.'
+            ELSE ':function.'
+        END || p.oid ||':/' || p.proname AS obj_path, n.nspname AS schema_name,
+        CASE
+            WHEN t.typname IN ('trigger', 'event_trigger') THEN {{ show_node_prefs['trigger_function'] }}
+            WHEN p.prokind = 'p' THEN {{ show_node_prefs['procedure'] }}
+            ELSE {{ show_node_prefs['function'] }}
+        END AS show_node,
+        pg_catalog.pg_get_function_identity_arguments(p.oid) AS other_info
+    from pg_catalog.pg_proc p join pg_catalog.pg_namespace n
+    on p.pronamespace = n.oid join pg_catalog.pg_type t
+    on p.prorettype = t.oid join pg_catalog.pg_language lng
+    ON lng.oid=p.prolang
+    WHERE p.prokind IN ('f', 'w', 'p')
+    AND CASE
+        WHEN t.typname IN ('trigger', 'event_trigger') THEN lng.lanname NOT IN ('edbspl', 'sql', 'internal')
+        ELSE true
+        END
+    AND ({{ CATALOGS.DB_SUPPORT('n') }}) AND p.prokind != 'a'
 {% endif %}
 {% if all_obj %}
     UNION
@@ -329,7 +346,6 @@ FROM (
 {% if all_obj %}
     UNION
 {% endif %}
-
 {% if 'subscription' not in skip_obj_type%}
 {% if all_obj or obj_type in ['subscription'] %}
     SELECT 'subscription'::text AS obj_type, subname AS obj_name, ':subscription.'||pub.oid||':/' || subname AS obj_path, ''::text AS schema_name,
@@ -457,7 +473,7 @@ FROM (
     {{ show_node_prefs['extension'] }} AS show_node, NULL AS other_info
     FROM pg_catalog.pg_extension x
     JOIN pg_catalog.pg_namespace n on x.extnamespace=n.oid
-    join pg_catalog.pg_available_extensions() e(name, default_version, comment) ON x.extname=e.name
+    join pg_catalog.pg_available_extensions() e ON x.extname=e.name
 {% endif %}
 {% if all_obj %}
     UNION
@@ -508,7 +524,7 @@ FROM (
     ':schema.'|| ns.oid || ':/' || ns.nspname || '/' || ':aggregate.' || ag.aggfnoid::oid ||':/' || pr.proname AS obj_path,
     ns.nspname AS schema_name,
     {{ show_node_prefs['aggregate'] }} AS show_node, pg_catalog.pg_get_function_arguments(aggfnoid::oid) AS other_info
-    FROM pg_aggregate ag
+    FROM pg_catalog.pg_aggregate ag
     LEFT OUTER JOIN pg_catalog.pg_proc pr ON pr.oid = ag.aggfnoid
     LEFT OUTER JOIN pg_catalog.pg_namespace ns ON ns.oid=pr.pronamespace
     WHERE ({{ CATALOGS.DB_SUPPORT('ns') }})

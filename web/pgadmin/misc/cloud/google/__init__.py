@@ -8,9 +8,9 @@
 # ##########################################################################
 
 # Google Cloud Deployment Implementation
-import pickle
 import json
 import os
+import sys
 from urllib.parse import unquote
 
 from config import root
@@ -20,15 +20,23 @@ from pgadmin.utils.ajax import plain_text_response, unauthorized, \
 from pgadmin.misc.bgprocess import BatchProcess
 from pgadmin.misc.cloud.utils import _create_server, CloudProcessDesc
 from pgadmin.utils import PgAdminModule, filename_with_file_manager_path
+from pgadmin.utils.text_sanitize import sanitize_external_text
 from pgadmin.user_login_check import pga_login_required
 from flask import session, current_app, request
 from flask_babel import gettext as _
 
 from oauthlib.oauth2 import AccessDeniedError
-from googleapiclient import discovery
-from googleapiclient.errors import HttpError
-from google_auth_oauthlib.flow import InstalledAppFlow
-from google.auth.transport.requests import Request
+
+# pgAdmin only authenticates to Google via google-auth and
+# google-auth-oauthlib, never the long-deprecated oauth2client.
+# googleapiclient still tries to import oauth2client optionally, and on
+# packaged installs the venv inherits the system site-packages
+# (--system-site-packages, see issue #7173) where a stale oauth2client and
+# an incompatible pyOpenSSL may be present. That optional import drags in
+# the broken pyOpenSSL and aborts startup with "module 'lib' has no
+# attribute 'GEN_EMAIL'". Blocking the module here makes googleapiclient
+# fall back to google-auth cleanly. See issue #10110.
+sys.modules.setdefault('oauth2client', None)
 
 MODULE_NAME = 'google'
 os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'  # Required for Oauth2
@@ -50,6 +58,32 @@ class GooglePostgresqlModule(PgAdminModule):
 
 blueprint = GooglePostgresqlModule(MODULE_NAME, __name__,
                                    static_url_path='/misc/cloud/google')
+
+
+def _get_google_from_session():
+    """Build a Google instance from `session['google']['state']`.
+
+    Returns None when no Google state has been seeded yet — callers should
+    treat that as "auth not yet started."
+
+    The previous implementation persisted a live Google instance via an
+    unsafe serializer, which represented an insecure-deserialization
+    vector. We now store only a JSON-safe dict and rebuild on demand.
+    """
+    google = session.get('google')
+    if not google:
+        return None
+    state = google.get('state')
+    if not state:
+        return None
+    return Google.from_state(state)
+
+
+def _save_google_to_session(google_obj):
+    """Persist the given Google instance's state into the session."""
+    if 'google' not in session:
+        session['google'] = {}
+    session['google']['state'] = google_obj.to_state()
 
 
 @blueprint.route("/")
@@ -77,9 +111,9 @@ def verify_credentials():
         client_secret_path = \
             filename_with_file_manager_path(client_secret_path)
     except PermissionError as e:
-        return unauthorized(errormsg=str(e))
+        return unauthorized(errormsg=sanitize_external_text(str(e)))
     except Exception as e:
-        return bad_request(errormsg=str(e))
+        return bad_request(errormsg=sanitize_external_text(str(e)))
 
     if client_secret_path and os.path.exists(client_secret_path):
         with open(client_secret_path, 'r') as json_file:
@@ -88,11 +122,14 @@ def verify_credentials():
         if 'google' not in session:
             session['google'] = {}
 
-        if 'google_obj' not in session['google'] or \
-                session['google']['client_config'] != client_config:
-            _google = Google(client_config)
+        # Reuse cached Google when client_config hasn't changed; otherwise
+        # start fresh (e.g., the user picked a different secret file).
+        cached_google = _get_google_from_session()
+        if cached_google is not None and \
+                session['google'].get('client_config') == client_config:
+            _google = cached_google
         else:
-            _google = pickle.loads(session['google']['google_obj'])
+            _google = Google(client_config)
 
         # get auth url
         host_url = request.origin + '/'
@@ -105,14 +142,16 @@ def verify_credentials():
         else:
             status = True
             res_data = {'auth_url': auth_url}
-            # save google object
         session['google']['client_config'] = client_config
-        session['google']['google_obj'] = pickle.dumps(_google, -1)
+        _save_google_to_session(_google)
     else:
         error = 'Client secret path not found'
         session.pop('google', None)
 
-    return make_json_response(success=status, errormsg=error, data=res_data)
+    return make_json_response(
+        success=status,
+        errormsg=sanitize_external_text(error),
+        data=res_data)
 
 
 @blueprint.route('/callback',
@@ -124,9 +163,12 @@ def callback():
     Call back function on google authentication response.
     :return:
     """
-    google_obj = pickle.loads(session['google']['google_obj'])
+    google_obj = _get_google_from_session()
+    if google_obj is None:
+        return plain_text_response(
+            'Authentication session expired. Please try again.')
     res = google_obj.callback(request)
-    session['google']['google_obj'] = pickle.dumps(google_obj, -1)
+    _save_google_to_session(google_obj)
     return plain_text_response(res)
 
 
@@ -139,11 +181,12 @@ def verification_ack():
     :return:
     """
     verified = False
-    if 'google' in session and 'google_obj' in session['google']:
-        google_obj = pickle.loads(session['google']['google_obj'])
+    google_obj = _get_google_from_session()
+    if google_obj is not None:
         verified, error = google_obj.verification_ack()
-        session['google']['google_obj'] = pickle.dumps(google_obj, -1)
-        return make_json_response(success=verified, errormsg=error)
+        _save_google_to_session(google_obj)
+        return make_json_response(
+            success=verified, errormsg=sanitize_external_text(error))
     else:
         return make_json_response(success=verified,
                                   errormsg='Authentication is failed.')
@@ -157,11 +200,11 @@ def get_projects():
     Lists the projects for authorized user
     :return: list of projects
     """
-    if 'google' in session and 'google_obj' in session['google']:
-        google_obj = pickle.loads(session['google']['google_obj'])
-        projects_list,error = google_obj.get_projects()
+    google_obj = _get_google_from_session()
+    if google_obj is not None:
+        projects_list, error = google_obj.get_projects()
         if error:
-            return bad_request(errormsg=error)
+            return bad_request(errormsg=sanitize_external_text(error))
         return make_json_response(data=projects_list)
 
 
@@ -174,13 +217,12 @@ def get_regions(project_id):
     :param project_id: google project id
     :return: google cloud sql region list
     """
-    if 'google' in session and 'google_obj' in session['google'] \
-            and project_id:
-        google_obj = pickle.loads(session['google']['google_obj'])
-        regions_list,error = google_obj.get_regions(project_id)
-        session['google']['google_obj'] = pickle.dumps(google_obj, -1)
+    google_obj = _get_google_from_session()
+    if google_obj is not None and project_id:
+        regions_list, error = google_obj.get_regions(project_id)
+        _save_google_to_session(google_obj)
         if error:
-            return bad_request(errormsg=error)
+            return bad_request(errormsg=sanitize_external_text(error))
         return make_json_response(data=regions_list)
     else:
         return make_json_response(data=[])
@@ -195,8 +237,8 @@ def get_availability_zones(region):
     :param region: google region
     :return: google cloud sql availability zone list
     """
-    if 'google' in session and 'google_obj' in session['google'] and region:
-        google_obj = pickle.loads(session['google']['google_obj'])
+    google_obj = _get_google_from_session()
+    if google_obj is not None and region:
         availability_zone_list = google_obj.get_availability_zones(region)
         return make_json_response(data=availability_zone_list)
     else:
@@ -215,15 +257,13 @@ def get_instance_types(project_id, region, instance_class):
     :param instance_class: google cloud sql instnace class
     :return:
     """
-    if 'google' in session and 'google_obj' in session['google'] and \
-            project_id and region:
-        google_obj = pickle.loads(session['google']['google_obj'])
-        instance_types_dict = google_obj.get_instance_types(
+    google_obj = _get_google_from_session()
+    if google_obj is not None and project_id and region:
+        instance_types_dict, error = google_obj.get_instance_types(
             project_id, region)
-        instance_types_list, error = (
-            instance_types_dict.get(instance_class, []))
         if error:
-            return bad_request(errormsg=error)
+            return bad_request(errormsg=sanitize_external_text(error))
+        instance_types_list = instance_types_dict.get(instance_class, [])
         return make_json_response(data=instance_types_list)
     else:
         return make_json_response(data=[])
@@ -237,11 +277,11 @@ def get_database_versions():
     Lists the postgresql database versions.
     :return: PostgreSQL version list
     """
-    if 'google' in session and 'google_obj' in session['google']:
-        google_obj = pickle.loads(session['google']['google_obj'])
+    google_obj = _get_google_from_session()
+    if google_obj is not None:
         db_version_list, error = google_obj.get_database_versions()
         if error:
-            return bad_request(errormsg=error)
+            return bad_request(errormsg=sanitize_external_text(error))
         return make_json_response(data=db_version_list)
     else:
         return make_json_response(data=[])
@@ -304,7 +344,9 @@ def deploy_on_google(data):
 
         # Set env variables for background process of deployment
         env = dict()
-        google_obj = pickle.loads(session['google']['google_obj'])
+        google_obj = _get_google_from_session()
+        if google_obj is None or google_obj.credentials_json is None:
+            return False, None, 'Google credentials missing from session.'
         env['GOOGLE_CREDENTIALS'] = json.dumps(google_obj.credentials_json)
 
         if 'db_password' in data['db_details']:
@@ -324,6 +366,20 @@ def clear_google_session():
     """Clear Google Session"""
     if 'google' in session:
         session.pop('google')
+
+
+def _google_sdk():
+    """Defer heavy Google API client imports until required by user actions.
+    Repeat calls are cheap via sys.modules caching.
+
+    Note: The oauth2client sentinel installed at module import (line 39)
+    must precede this googleapiclient import. See issue #10110.
+    """
+    from types import SimpleNamespace
+    from googleapiclient import discovery
+    from googleapiclient.errors import HttpError
+
+    return SimpleNamespace(discovery=discovery, HttpError=HttpError)
 
 
 class Google:
@@ -352,6 +408,60 @@ class Google:
         self._verification_error = None
         self._redirect_url = None
 
+    def to_state(self):
+        """Serialize the persistable state of this Google instance to a
+        plain dict for storage in `flask.session`.
+
+        Live SDK objects (like `_credentials`) are intentionally NOT
+        included — they are rebuilt from `credentials_json` in
+        `from_state()`. Storing only data primitives lets the session
+        layer use a safe (non-binary-serializer) format.
+        """
+        return {
+            'client_config': self._client_config,
+            'credentials_json': self.credentials_json,
+            'redirect_url': self._redirect_url,
+            'project_id': self._project_id,
+            'regions': self._regions,
+            'availability_zones': self._availability_zones,
+            'verification_successful': self._verification_successful,
+            'verification_error': self._verification_error,
+        }
+
+    @classmethod
+    def from_state(cls, state):
+        """Rebuild a Google instance from a previously-serialized dict.
+
+        The reverse of `to_state()`. The Google SDK credentials object is
+        reconstructed from the stored token dict so subsequent API calls
+        work without forcing the user back through the OAuth2 flow.
+        """
+        if not isinstance(state, dict):
+            return None
+        obj = cls(client_config=state.get('client_config'))
+        obj.credentials_json = state.get('credentials_json')
+        if obj.credentials_json:
+            # Rebuild google.oauth2.credentials.Credentials from the
+            # persisted token dict. Credentials() ignores unknown kwargs,
+            # so id_token (kept in the dict for API parity) is dropped.
+            from google.oauth2.credentials import Credentials
+            obj._credentials = Credentials(
+                token=obj.credentials_json.get('token'),
+                refresh_token=obj.credentials_json.get('refresh_token'),
+                token_uri=obj.credentials_json.get('token_uri'),
+                client_id=obj.credentials_json.get('client_id'),
+                client_secret=obj.credentials_json.get('client_secret'),
+                scopes=obj.credentials_json.get('scopes'),
+            )
+        obj._redirect_url = state.get('redirect_url')
+        obj._project_id = state.get('project_id')
+        obj._regions = state.get('regions', []) or []
+        obj._availability_zones = state.get('availability_zones', {}) or {}
+        obj._verification_successful = bool(
+            state.get('verification_successful', False))
+        obj._verification_error = state.get('verification_error')
+        return obj
+
     def get_auth_url(self, host_url):
         """
         Provides google authorisation url
@@ -366,6 +476,8 @@ class Google:
         self._verification_error = None
         try:
             self._redirect_url = host_url + 'google/callback'
+            # Defer InstalledAppFlow (heavy import, user action only, cached)
+            from google_auth_oauthlib.flow import InstalledAppFlow
             flow = InstalledAppFlow.from_client_config(
                 client_config=self._client_config, scopes=self._scopes,
                 redirect_uri=self._redirect_url)
@@ -389,6 +501,8 @@ class Google:
             if session['state'] != flask_request.args.get('state', None):
                 self._verification_successful = False,
                 self._verification_error = 'Invalid state parameter'
+            # Defer InstalledAppFlow (heavy import, user action only, cached)
+            from google_auth_oauthlib.flow import InstalledAppFlow
             flow = InstalledAppFlow.from_client_config(
                 client_config=self._client_config, scopes=self._scopes,
                 redirect_uri=self._redirect_url)
@@ -404,6 +518,10 @@ class Google:
             self._verification_error = er.error
             if self._verification_error == 'access_denied':
                 self._verification_error = 'Access denied.'
+            return self._verification_error
+        except ImportError as er:
+            self._verification_successful = False
+            self._verification_error = str(er)
             return self._verification_error
 
     @staticmethod
@@ -430,6 +548,8 @@ class Google:
             if self._credentials and self._credentials.expired and \
                     self._credentials.refresh_token and \
                     self._credentials.has_scopes(scopes):
+                # Defer Request (heavy import, user action only, cached)
+                from google.auth.transport.requests import Request
                 self._credentials.refresh(Request())
                 return self._credentials
         return self._credentials
@@ -441,17 +561,22 @@ class Google:
         """
         projects = []
         error = None
-        credentials = self._get_credentials(self._scopes)
-        service = discovery.build('cloudresourcemanager',
-                                  self._cloud_resource_manager_api_version,
-                                  credentials=credentials)
         try:
+            sdk = _google_sdk()
+        except ImportError as e:
+            return projects, str(e)
+        try:
+            credentials = self._get_credentials(self._scopes)
+            service = sdk.discovery.build(
+                'cloudresourcemanager',
+                self._cloud_resource_manager_api_version,
+                credentials=credentials)
             req = service.projects().list()
             res = req.execute()
             for project in res.get('projects', []):
                 projects.append({'label': project['projectId'],
                                  'value': project['projectId']})
-        except HttpError as e:
+        except sdk.HttpError as e:
             error = e.reason
         except Exception as e:
             error = str(e)
@@ -464,12 +589,16 @@ class Google:
         :return:
         """
         self._project_id = project
-        credentials = self._get_credentials(self._scopes)
-        service = discovery.build('compute',
-                                  self._compute_api_version,
-                                  credentials=credentials)
+        try:
+            sdk = _google_sdk()
+        except ImportError as e:
+            return self._regions, str(e)
         error = None
         try:
+            credentials = self._get_credentials(self._scopes)
+            service = sdk.discovery.build('compute',
+                                          self._compute_api_version,
+                                          credentials=credentials)
             req = service.regions().list(project=project)
             res = req.execute()
             for item in res.get('items', []):
@@ -480,7 +609,7 @@ class Google:
                 region_zones = list(
                     map(lambda region: region.split('/')[-1], region_zones))
                 self._availability_zones[region_name] = region_zones
-        except HttpError as e:
+        except sdk.HttpError as e:
             error = e.reason
         except Exception as e:
             error = str(e)
@@ -509,11 +638,15 @@ class Google:
         high_mem = []
         instance_types = {}
         error = None
-        credentials = self._get_credentials(self._scopes)
-        service = discovery.build('sqladmin',
-                                  self._sqladmin_api_version,
-                                  credentials=credentials)
         try:
+            sdk = _google_sdk()
+        except ImportError as e:
+            return instance_types, str(e)
+        try:
+            credentials = self._get_credentials(self._scopes)
+            service = sdk.discovery.build('sqladmin',
+                                          self._sqladmin_api_version,
+                                          credentials=credentials)
             req = service.tiers().list(project=project)
             res = req.execute()
             for item in res.get('items', []):
@@ -543,7 +676,7 @@ class Google:
             instance_types = {'standard': standard_instances,
                               'highmem': high_mem,
                               'shared': shared_instances}
-        except HttpError as e:
+        except sdk.HttpError as e:
             error = e.reason
         except Exception as e:
             error = str(e)
@@ -557,11 +690,15 @@ class Google:
         pg_database_versions = []
         database_versions = []
         error = None
-        credentials = self._get_credentials(self._scopes)
-        service = discovery.build('sqladmin',
-                                  self._sqladmin_api_version,
-                                  credentials=credentials)
         try:
+            sdk = _google_sdk()
+        except ImportError as e:
+            return database_versions, str(e)
+        try:
+            credentials = self._get_credentials(self._scopes)
+            service = sdk.discovery.build('sqladmin',
+                                          self._sqladmin_api_version,
+                                          credentials=credentials)
             req = service.flags().list()
             res = req.execute()
             for item in res.get('items', []):
@@ -571,7 +708,7 @@ class Google:
                 label = (version.title().split('_')[0])[0:7] \
                     + 'SQL ' + version.split('_')[1]
                 database_versions.append({'label': label, 'value': version})
-        except HttpError as e:
+        except sdk.HttpError as e:
             error = e.reason
         except Exception as e:
             error = str(e)

@@ -9,8 +9,9 @@
 
 import os
 import sys
-import keyring
 import importlib.util
+
+from pgadmin.utils.db_utils import normalize_database_uri
 
 # User configs loaded from config_local, config_distro etc.
 custom_config_settings = {}
@@ -114,10 +115,9 @@ def evaluate_and_patch_config(config: dict) -> dict:
 
     # To use psycopg3 driver, need to specify +psycopg in conn URI
     if 'CONFIG_DATABASE_URI' in custom_config_settings:
-        db_uri = custom_config_settings['CONFIG_DATABASE_URI']
-        if db_uri.startswith('postgresql:'):
-            custom_config_settings['CONFIG_DATABASE_URI'] = \
-                'postgresql+psycopg:{0}'.format(db_uri[db_uri.find(':') + 1:])
+        custom_config_settings['CONFIG_DATABASE_URI'] = \
+            normalize_database_uri(
+                custom_config_settings['CONFIG_DATABASE_URI'])
 
     # Finally update config user configs
     config.update(custom_config_settings)
@@ -136,8 +136,19 @@ def evaluate_and_patch_config(config: dict) -> dict:
         config.setdefault('USE_OS_SECRET_STORAGE', False)
         config.setdefault('KEYRING_NAME', '')
     else:
-        k_name = keyring.get_keyring().name
-        # Setup USE_OS_SECRET_STORAGE false as no keyring backend available
+        # NOTE: whether the selected keyring backend is actually *usable*
+        # (e.g. SecretService with no live D-Bus/GNOME-Keyring session) is
+        # probed separately, asynchronously, from create_app() via
+        # keyring_probe.start_async_probe() - see that module for why this
+        # can't be done safely here at config-import time.
+        config.setdefault('USE_OS_SECRET_STORAGE', True)
+        k_name = ''
+        try:
+            import keyring
+            k_name = keyring.get_keyring().name
+        except Exception:
+            k_name = 'fail Keyring'
+
         if k_name == 'fail Keyring':
             config['USE_OS_SECRET_STORAGE'] = False
             config['KEYRING_NAME'] = ''

@@ -7,8 +7,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS "Idx_$%{}[]()&*^!@""'`\/#"
     (id ASC NULLS FIRST, name COLLATE pg_catalog."POSIX" text_pattern_ops ASC NULLS FIRST)
     INCLUDE(name, id)
     NULLS NOT DISTINCT
-    WITH (fillfactor=10, deduplicate_items=True)
-    TABLESPACE pg_default
+    WITH (fillfactor=10)
+
     WHERE id < 100;
 
 COMMENT ON INDEX public."Idx_$%{}[]()&*^!@""'`\/#"

@@ -28,9 +28,11 @@ from pgadmin.utils.driver import get_driver
 from pgadmin.utils.constants import PREF_LABEL_DISPLAY, \
     ERROR_MSG_TRANS_ID_NOT_FOUND
 from sqlalchemy import or_
-from pgadmin.authenticate import socket_login_required
+from pgadmin.authenticate import socket_permissions_required
 from pgadmin import socketio
 from pgadmin.tools.user_management.PgAdminPermissions import AllPermissionTypes
+from pgadmin.utils.server_access import \
+    get_server as get_server_access, get_user_server_query
 
 MODULE_NAME = 'schema_diff'
 COMPARE_MSG = gettext("Comparing objects...")
@@ -205,6 +207,7 @@ def update_session_diff_transaction(trans_id, session_obj, diff_model_obj):
     methods=["GET"],
     endpoint="initialize"
 )
+@permissions_required(AllPermissionTypes.tools_schema_diff)
 @pga_login_required
 def initialize(trans_id):
     """
@@ -235,6 +238,7 @@ def initialize(trans_id):
 @blueprint.route('/close/<int:trans_id>',
                  methods=["DELETE"],
                  endpoint='close')
+@pga_login_required
 def close(trans_id):
     """
     Remove the session details for the particular transaction id.
@@ -268,6 +272,7 @@ def close(trans_id):
     methods=["GET"],
     endpoint="servers"
 )
+@permissions_required(AllPermissionTypes.tools_schema_diff)
 @pga_login_required
 def servers():
     """
@@ -283,18 +288,14 @@ def servers():
         from pgadmin.browser.server_groups.servers import\
             server_icon_and_background
 
-        for server in Server.query.filter(
-                or_(Server.user_id == current_user.id, Server.shared),
+        for server in get_user_server_query().filter(
                 Server.is_adhoc == 0):
 
             shared_server = SharedServer.query.filter_by(
-                name=server.name, user_id=current_user.id,
-                servergroup_id=server.servergroup_id).first()
+                user_id=current_user.id,
+                osid=server.id).first()
 
-            if server.discovery_id:
-                auto_detected_server = server.name
-
-            if shared_server and shared_server.name == auto_detected_server:
+            if server.discovery_id and shared_server:
                 continue
 
             manager = driver.connection_manager(server.id)
@@ -309,10 +310,10 @@ def servers():
                 "connected": connected
             }
 
-            if server.servers.name in res:
-                res[server.servers.name].append(server_info)
+            if server.servergroup.name in res:
+                res[server.servergroup.name].append(server_info)
             else:
-                res[server.servers.name] = [server_info]
+                res[server.servergroup.name] = [server_info]
 
     except Exception as e:
         app.logger.exception(e)
@@ -325,6 +326,7 @@ def servers():
     methods=["GET"],
     endpoint="get_server"
 )
+@permissions_required(AllPermissionTypes.tools_schema_diff)
 @pga_login_required
 def get_server(sid, did):
     """
@@ -336,7 +338,13 @@ def get_server(sid, did):
         """Return a JSON document listing the server groups for the user"""
         driver = get_driver(PG_DEFAULT_DRIVER)
 
-        server = Server.query.filter_by(id=sid).first()
+        server = get_server_access(sid)
+        if server is None:
+            return make_json_response(
+                status=410, success=0,
+                errormsg=gettext(
+                    "Could not find the required server.")
+            )
         manager = driver.connection_manager(sid)
         conn = manager.connection(did=did)
         connected = conn.connected()
@@ -362,6 +370,7 @@ def get_server(sid, did):
     methods=["POST"],
     endpoint="connect_server"
 )
+@permissions_required(AllPermissionTypes.tools_schema_diff)
 @pga_login_required
 def connect_server(sid):
     # Check if server is already connected then no need to reconnect again.
@@ -375,7 +384,12 @@ def connect_server(sid):
             data={}
         )
 
-    server = Server.query.filter_by(id=sid).first()
+    server = get_server_access(sid)
+    if server is None:
+        return make_json_response(
+            status=410, success=0,
+            errormsg=gettext("Could not find the required server.")
+        )
     view = SchemaDiffRegistry.get_node_view('server')
     return view.connect(server.servergroup_id, sid)
 
@@ -385,9 +399,15 @@ def connect_server(sid):
     methods=["POST"],
     endpoint="connect_database"
 )
+@permissions_required(AllPermissionTypes.tools_schema_diff)
 @pga_login_required
 def connect_database(sid, did):
-    server = Server.query.filter_by(id=sid).first()
+    server = get_server_access(sid)
+    if server is None:
+        return make_json_response(
+            status=410, success=0,
+            errormsg=gettext("Could not find the required server.")
+        )
     view = SchemaDiffRegistry.get_node_view('database')
     return view.connect(server.servergroup_id, sid, did)
 
@@ -397,6 +417,7 @@ def connect_database(sid, did):
     methods=["GET"],
     endpoint="databases"
 )
+@permissions_required(AllPermissionTypes.tools_schema_diff)
 @pga_login_required
 def databases(sid):
     """
@@ -407,7 +428,13 @@ def databases(sid):
     try:
         view = SchemaDiffRegistry.get_node_view('database')
 
-        server = Server.query.filter_by(id=sid).first()
+        server = get_server_access(sid)
+        if server is None:
+            return make_json_response(
+                status=410, success=0,
+                errormsg=gettext(
+                    "Could not find the required server.")
+            )
         response = view.nodes(gid=server.servergroup_id, sid=sid,
                               is_schema_diff=True)
         databases = json.loads(response.data)['data']
@@ -434,6 +461,7 @@ def databases(sid):
     methods=["GET"],
     endpoint="schemas"
 )
+@permissions_required(AllPermissionTypes.tools_schema_diff)
 @pga_login_required
 def schemas(sid, did):
     """
@@ -458,7 +486,7 @@ def schemas(sid, did):
 
 
 @socketio.on('compare_database', namespace=SOCKETIO_NAMESPACE)
-@socket_login_required
+@socket_permissions_required(AllPermissionTypes.tools_schema_diff)
 def compare_database(params):
     """
     This function will compare the two databases.
@@ -494,6 +522,15 @@ def compare_database(params):
         schema_result = \
             fetch_compare_schemas(params['source_sid'], params['source_did'],
                                   params['target_sid'], params['target_did'])
+
+        if schema_result is None:
+            socketio.emit(
+                'compare_database_failed',
+                gettext(
+                    "Failed to fetch schemas from the"
+                    " server."),
+                namespace=SOCKETIO_NAMESPACE, to=request.sid)
+            return
 
         total_schema = len(schema_result['source_only']) + len(
             schema_result['target_only']) + len(
@@ -600,15 +637,19 @@ def compare_database(params):
 
     except Exception as e:
         app.logger.exception(e)
+        # Reporting success as well would hand the client a comparison
+        # that stopped part way through as though it were complete
+        # (#10303).
         socketio.emit('compare_database_failed', str(e),
                       namespace=SOCKETIO_NAMESPACE, to=request.sid)
+        return
 
     socketio.emit('compare_database_success', comparison_result,
                   namespace=SOCKETIO_NAMESPACE, to=request.sid)
 
 
 @socketio.on('compare_schema', namespace=SOCKETIO_NAMESPACE)
-@socket_login_required
+@socket_permissions_required(AllPermissionTypes.tools_schema_diff)
 def compare_schema(params):
     """
     This function will compare the two schema.
@@ -665,8 +706,12 @@ def compare_schema(params):
 
     except Exception as e:
         app.logger.exception(e)
+        # As above: a partial comparison must not be reported as a
+        # successful one (#10303).
         socketio.emit('compare_schema_failed', str(e),
                       namespace=SOCKETIO_NAMESPACE, to=request.sid)
+        return
+
     socketio.emit('compare_schema_success', comparison_result,
                   namespace=SOCKETIO_NAMESPACE, to=request.sid)
 
@@ -678,6 +723,7 @@ def compare_schema(params):
     methods=["GET"],
     endpoint="ddl_compare"
 )
+@permissions_required(AllPermissionTypes.tools_schema_diff)
 @pga_login_required
 def ddl_compare(trans_id, source_sid, source_did, source_scid,
                 target_sid, target_did, target_scid, source_oid,
@@ -722,11 +768,15 @@ def check_version_compatibility(sid, tid):
     """Check the version compatibility of source and target servers."""
 
     driver = get_driver(PG_DEFAULT_DRIVER)
-    src_server = Server.query.filter_by(id=sid).first()
+    src_server = get_server_access(sid)
+    if src_server is None:
+        return False, gettext("Could not find the source server.")
     src_manager = driver.connection_manager(src_server.id)
     src_conn = src_manager.connection()
 
-    tar_server = Server.query.filter_by(id=tid).first()
+    tar_server = get_server_access(tid)
+    if tar_server is None:
+        return False, gettext("Could not find the target server.")
     tar_manager = driver.connection_manager(tar_server.id)
     target_conn = tar_manager.connection()
 
@@ -759,7 +809,9 @@ def get_schemas(sid, did):
     """
     try:
         view = SchemaDiffRegistry.get_node_view('schema')
-        server = Server.query.filter_by(id=sid).first()
+        server = get_server_access(sid)
+        if server is None:
+            return None
         response = view.nodes(gid=server.servergroup_id, sid=sid, did=did,
                               is_schema_diff=True)
         schemas = json.loads(response.data)['data']
@@ -911,6 +963,9 @@ def fetch_compare_schemas(source_sid, source_did, target_sid, target_did):
     """
     source_schemas = get_schemas(source_sid, source_did)
     target_schemas = get_schemas(target_sid, target_did)
+
+    if source_schemas is None or target_schemas is None:
+        return None
 
     src_schema_dict = {item['label']: item['_id'] for item in source_schemas}
     tar_schema_dict = {item['label']: item['_id'] for item in target_schemas}

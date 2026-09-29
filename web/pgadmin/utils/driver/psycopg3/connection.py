@@ -17,7 +17,6 @@ import os
 import secrets
 import datetime
 import asyncio
-import copy
 from collections import deque
 import psycopg
 from flask import g, current_app
@@ -38,6 +37,7 @@ from .typecast import register_binary_data_typecasters,\
     register_binary_typecasters, register_array_to_string_typecasters,\
     register_numeric_typecasters, ALL_JSON_TYPES
 from .encoding import get_encoding, configure_driver_encodings
+from pgadmin.utils.text_sanitize import sanitize_external_text
 from pgadmin.utils import csv_lib as csv
 from pgadmin.utils.master_password import get_crypt_key
 from io import StringIO
@@ -281,7 +281,6 @@ class Connection(BaseConnection):
         password, encpass, is_update_password = \
             self._check_user_password(kwargs)
 
-        passfile = kwargs['passfile'] if 'passfile' in kwargs else None
         tunnel_password = kwargs['tunnel_password'] if 'tunnel_password' in \
                                                        kwargs else ''
 
@@ -313,14 +312,28 @@ class Connection(BaseConnection):
         if is_error:
             return False, errmsg
 
-        # If no password credential is found then connect request might
-        # come from Query tool, ViewData grid, debugger etc tools.
-        # we will check for pgpass file availability from connection manager
-        # if it's present then we will use it
-        if not password and not encpass and not passfile:
-            passfile = manager.get_connection_param_value('passfile')
-            if manager.passexec:
+        # If no password credential is found then connect request might come
+        # from Query tool, ViewData grid, debugger, etc. In that case, fall
+        # back to using the password returned from manager.passexec.
+        passfile = manager.get_connection_param_value('passfile')
+        if not password and not encpass and manager.passexec:
+            if not passfile:
                 password = manager.passexec.get()
+            else:
+                current_app.logger.warning(
+                    'Ignoring passexec in favor of the specified passfile '
+                    f'({passfile!r}).'
+                )
+
+        # create_connection_string() automatically picks up the passfile from
+        # connection parameters. Warn if that differs from the passfile kwarg.
+        passfile_kwarg = kwargs.get('passfile', None)
+        if passfile_kwarg and passfile_kwarg != passfile:
+            current_app.logger.warning(
+                'Conflicting passfiles specified through keyword arguments '
+                f'({passfile_kwarg!r}) and connection parameters '
+                f'({passfile!r}); using the latter.'
+            )
 
         try:
             database = self.db
@@ -447,7 +460,8 @@ class Connection(BaseConnection):
             role = manager.role
 
         if is_set_role:
-            _query = "SELECT rolname from pg_roles WHERE rolname = {0}" \
+            _query = "SELECT rolname from pg_catalog.pg_roles " \
+                     "WHERE rolname = {0}" \
                      "".format(self.qtLiteral(role, self.conn))
             _status, res = self.execute_scalar(_query)
 
@@ -516,9 +530,9 @@ class Connection(BaseConnection):
 
         status, cur = self.__cursor()
 
-        # Note that we use 'UPDATE pg_settings' for setting bytea_output as a
-        # convenience hack for those running on old, unsupported versions of
-        # PostgreSQL 'cos we're nice like that.
+        # Note that we use pg_show_all_settings()/set_config for setting
+        # bytea_output as a convenience hack for those running on old,
+        # unsupported versions of PostgreSQL 'cos we're nice like that.
         status = self._execute(
             cur,
             "SET DateStyle=ISO; "
@@ -627,12 +641,12 @@ WHERE db.datname = current_database()""")
             CASE WHEN roles.rolsuper THEN true
             ELSE roles.rolcreatedb END as can_create_db,
             CASE WHEN 'pg_signal_backend'=ANY(ARRAY(WITH RECURSIVE cte AS (
-            SELECT pg_roles.oid,pg_roles.rolname FROM pg_roles
+            SELECT pg_roles.oid,pg_roles.rolname FROM pg_catalog.pg_roles
                 WHERE pg_roles.oid = roles.oid
             UNION ALL
             SELECT m.roleid,pgr.rolname FROM cte cte_1
-                JOIN pg_auth_members m ON m.member = cte_1.oid
-                JOIN pg_roles pgr ON pgr.oid = m.roleid)
+                JOIN pg_catalog.pg_auth_members m ON m.member = cte_1.oid
+                JOIN pg_catalog.pg_roles pgr ON pgr.oid = m.roleid)
             SELECT rolname  FROM cte)) THEN True
             ELSE False END as can_signal_backend
         FROM
@@ -682,10 +696,17 @@ WHERE db.datname = current_database()""")
         if manager.post_connection_sql and manager.post_connection_sql != '':
             status = self._execute(cur, manager.post_connection_sql)
             if status is not None:
-                errmsg = gettext(("Failed to execute the post connection SQL "
-                                  "with below error message:\n{msg}").format(
-                    msg=status))
-                current_app.logger.error(errmsg)
+                # Log the raw PG-returned text so the server log stays
+                # human-readable. HTML-escape only the value that crosses
+                # into the JSON response, where downstream consumers may
+                # render it as HTML.
+                current_app.logger.error(
+                    "Failed to execute the post connection SQL "
+                    "with below error message:\n%s", status)
+                errmsg = gettext(
+                    "Failed to execute the post connection SQL "
+                    "with below error message:\n{msg}").format(
+                    msg=sanitize_external_text(status))
         return errmsg
 
     def __cursor(self, server_cursor=False, scrollable=False):
@@ -809,7 +830,7 @@ WHERE db.datname = current_database()""")
                 25,
                 'Psycopg3 Cursor: {0}'.format(str(e)))
 
-    def __internal_blocking_execute(self, cur, query, params):
+    def __internal_blocking_execute(self, cur, query, params, prepare=None):
         """
         This function executes the query using cursor's execute function,
         but in case of asynchronous connection we need to wait for the
@@ -820,10 +841,17 @@ WHERE db.datname = current_database()""")
             cur: Cursor object
             query: SQL query to run.
             params: Extra parameters
+            prepare: force the query through PostgreSQL's PREPARE step
+                (extended query protocol) when True. Unlike the simple
+                query protocol, the server rejects more than one SQL
+                statement in a single Parse message, so this is used by
+                callers that must guarantee a single statement is
+                executed regardless of how a client-side SQL lexer
+                would have classified the text.
         """
 
         query = query.encode(self.python_encoding)
-        cur.execute(query, params)
+        cur.execute(query, params, prepare=prepare)
 
     def execute_on_server_as_csv(self, records=2000):
         """
@@ -1225,7 +1253,7 @@ WHERE db.datname = current_database()""")
         )
 
     def execute_2darray(self, query, params=None,
-                        formatted_exception_msg=False):
+                        formatted_exception_msg=False, prepare=None):
         status, cur = self.__cursor()
         self.row_count = 0
 
@@ -1249,14 +1277,16 @@ WHERE db.datname = current_database()""")
             )
         )
         try:
-            self.__internal_blocking_execute(cur, query, params)
+            self.__internal_blocking_execute(
+                cur, query, params, prepare=prepare
+            )
         except psycopg.Error as pe:
             cur.close_cursor()
             if not self.connected() and self.auto_reconnect and \
                     not self.reconnecting:
                 return self.__attempt_execution_reconnect(
                     self.execute_2darray, query, params,
-                    formatted_exception_msg
+                    formatted_exception_msg, prepare
                 )
             errmsg = self._formatted_exception_msg(pe, formatted_exception_msg)
             current_app.logger.error(
@@ -1486,7 +1516,43 @@ Failed to reset the connection to the server due to following error:
         return self.__async_query_error
 
     def ping(self):
-        return self.execute_scalar('SELECT 1')
+        """
+        Check if the connection is actually alive by executing a lightweight
+        query.  Unlike connected(), which only inspects local state, this
+        sends traffic to the server and will detect stale / half-open TCP
+        connections that were silently dropped by firewalls or the OS while
+        pgAdmin was idle.
+
+        Returns True if alive, False otherwise.
+        """
+        if not self.connected():
+            return False
+
+        try:
+            # Check the transaction status before executing the ping
+            # query.  If a query is already in progress (ACTIVE) or we
+            # are inside a transaction block (INTRANS / INERROR), running
+            # SELECT 1 would fail or disrupt the ongoing operation.  In
+            # those states the connection is evidently alive, so just
+            # return True.
+            #   0 = IDLE     — safe to send a query
+            #   1 = ACTIVE   — command in progress, connection is alive
+            #   2 = INTRANS  — in transaction block, connection is alive
+            #   3 = INERROR  — in failed transaction, connection is alive
+            if self.conn.info.transaction_status != 0:
+                return True
+
+            cur = self.conn.cursor()
+            cur.execute("SELECT 1")
+            cur.close()
+            return True
+        except Exception:
+            try:
+                self.conn.close()
+            except Exception:
+                pass
+            self.conn = None
+            return False
 
     def _release(self):
         if self.wasConnected:

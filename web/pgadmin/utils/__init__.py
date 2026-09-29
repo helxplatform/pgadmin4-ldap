@@ -61,6 +61,17 @@ class PgAdminModule(Blueprint):
         sub-modules at once.
         """
 
+        # Sub-classes populate self.submodules from their own register(),
+        # but the blueprint objects themselves are module level singletons,
+        # so registering one against a second application instance (which
+        # happens whenever more than one app is created in a single
+        # process, as the regression suite does) would otherwise leave a
+        # duplicate entry behind for every sub-module. Anything that walks
+        # self.submodules then does its work once per duplicate; in Schema
+        # Diff's case that means generating the same DDL several times
+        # over.
+        self.submodules = list(dict.fromkeys(self.submodules))
+
         super().register(app, options)
 
         def create_module_preference():
@@ -77,7 +88,8 @@ class PgAdminModule(Blueprint):
         app.register_before_app_start(create_module_preference)
 
         for module in self.submodules:
-            module.parentmodules.append(self)
+            if self not in module.parentmodules:
+                module.parentmodules.append(self)
             if app.blueprints.get(module.name) is None:
                 app.register_blueprint(module)
                 app.register_logout_hook(module)
@@ -358,14 +370,14 @@ def does_utility_exist(file):
     return error_msg
 
 
-def get_server(sid):
+def get_server(sid, only_owned=False):
+    """Fetch a server by ID with access check.
+
+    Delegates to server_access.get_server(). Kept here for backward
+    compatibility — existing callers import from pgadmin.utils.
     """
-    # Fetch the server  etc
-    :param sid:
-    :return: server
-    """
-    server = Server.query.filter_by(id=sid).first()
-    return server
+    from pgadmin.utils.server_access import get_server as _get_server
+    return _get_server(sid, only_owned=only_owned)
 
 
 def get_binary_path_versions(binary_path: str) -> dict:
@@ -601,8 +613,10 @@ def validate_json_data(data, is_admin):
     for server in data["Servers"]:
         obj = data["Servers"][server]
 
+        is_shared = obj.get("Shared", None)
+
         # Check if server is shared.Won't import if user is non-admin
-        if obj.get('Shared', None) and not is_admin:
+        if is_shared and not is_admin:
             print("Won't import the server '%s' as it is shared " %
                   obj["Name"])
             skip_servers.append(server)
@@ -627,14 +641,31 @@ def validate_json_data(data, is_admin):
         is_service_attrib_available = obj.get("Service", None) is not None
 
         if not is_service_attrib_available:
-            for attrib in ("Port", "Username"):
-                errmsg = check_attrib(attrib)
-                if errmsg:
-                    return errmsg
-                if attrib == 'Port':
-                    errmsg = check_is_integer(obj[attrib])
-                    if errmsg:
-                        return errmsg
+            errmsg = check_attrib("Port")
+            if errmsg:
+                return errmsg
+            errmsg = check_is_integer(obj["Port"])
+            if errmsg:
+                return errmsg
+
+            if is_shared:
+                # Shared servers may carry either the owner's username
+                # or a per-user override, so accept either attribute.
+                # Check the values rather than merely the keys: the
+                # loader falls back to SharedUsername when Username is
+                # absent, so an empty or null SharedUsername would
+                # otherwise be stored as the server's username.
+                if not obj.get("Username") and not obj.get("SharedUsername"):
+                    return gettext(
+                        "'Username' or 'SharedUsername' attribute not "
+                        "found for server '%s'" % server
+                    )
+            else:
+                if not obj.get("Username"):
+                    return gettext(
+                        "'Username' attribute not found for server '%s'" %
+                        server
+                    )
 
         errmsg = check_attrib("MaintenanceDB")
         if errmsg:
@@ -720,6 +751,12 @@ def load_database_servers(input_file, selected_servers,
                 groups_added = groups_added + 1
                 groups = ServerGroup.query.filter_by(user_id=user_id)
 
+            is_shared = obj.get("Shared", None)
+            username = obj.get("Username", None)
+            shared_username = obj.get("SharedUsername", None)
+            if is_shared and username is None:
+                username = shared_username
+
             # Create the server
             new_server = Server()
             new_server.name = obj["Name"]
@@ -731,7 +768,7 @@ def load_database_servers(input_file, selected_servers,
 
             new_server.port = obj.get("Port", None)
 
-            new_server.username = obj.get("Username", None)
+            new_server.username = username
 
             new_server.role = obj.get("Role", None)
 
@@ -785,9 +822,9 @@ def load_database_servers(input_file, selected_servers,
             new_server.tunnel_keep_alive = \
                 obj.get("TunnelKeepAlive", None)
 
-            new_server.shared = obj.get("Shared", None)
+            new_server.shared = is_shared
 
-            new_server.shared_username = obj.get("SharedUsername", None)
+            new_server.shared_username = shared_username
 
             new_server.kerberos_conn = obj.get("KerberosAuthentication", None)
 
@@ -999,8 +1036,11 @@ def get_safe_post_logout_redirect():
 
 
 def check_extension_exists(conn, extension_name):
-    sql = f"SELECT * FROM pg_extension WHERE extname = '{extension_name}'"
-    status, res = conn.execute_scalar(sql)
+    sql = (
+        "SELECT 1 FROM pg_catalog.pg_extension "
+        "WHERE extname = %s"
+    )
+    status, res = conn.execute_scalar(sql, [extension_name])
     if status:
         if res:
             return status, True

@@ -185,6 +185,7 @@ def preferences_s():
 
 
 @blueprint.route("/get_all_cli", methods=["GET"], endpoint='get_all_cli')
+@pga_login_required
 def get_all_cli():
     """Fetch all preferences for caching."""
     # Load Preferences
@@ -229,6 +230,18 @@ def save():
     """
     pref_data = get_data()
 
+    # Check once whether the user is explicitly setting default_provider
+    # in this save, so auto-selection doesn't override their choice.
+    _provider_map = {
+        'anthropic_api_key_file': 'anthropic',
+        'openai_api_key_file': 'openai',
+        'ollama_api_url': 'ollama',
+        'docker_api_url': 'docker',
+    }
+    explicit_provider_choice = any(
+        item.get('name') == 'default_provider' for item in pref_data
+    )
+
     for data in pref_data:
         if data['name'] in ['vw_edt_tab_title_placeholder',
                             'qt_tab_title_placeholder',
@@ -242,6 +255,16 @@ def save():
 
         if data['name'] == 'save_app_state' and not data['value']:
             delete_tool_data()
+
+        # Auto-select the default LLM provider when an API key/URL is
+        # configured and no provider has been selected yet.
+        if res and not explicit_provider_choice and \
+                data['name'] in _provider_map and data['value']:
+            ai_module = Preferences.module('ai')
+            if ai_module:
+                dp_pref = ai_module.preference('default_provider')
+                if dp_pref and not dp_pref.get():
+                    dp_pref.set(_provider_map[data['name']])
 
         if not res:
             return internal_server_error(errormsg=msg)
@@ -291,13 +314,9 @@ def save_pref(data):
     if data['value'] in ['true','false']:
         data['value'] = True if data['value'] == 'true' else False
 
-    res, _ = Preferences.save_cli(
+    return Preferences.save_cli(
         data['mid'], data['category_id'], data['id'], data['user_id'],
         data['value'])
-
-    if not res:
-        return False
-    return True
 
 
 @blueprint.route("/update", methods=["PUT"], endpoint="update_pref")
@@ -308,6 +327,18 @@ def update():
     """
     pref_data = get_data()
     pref_data = json.loads(pref_data['pref_data'])
+
+    # Check once whether the user is explicitly setting default_provider
+    # in this save, so auto-selection doesn't override their choice.
+    _provider_map = {
+        'anthropic_api_key_file': 'anthropic',
+        'openai_api_key_file': 'openai',
+        'ollama_api_url': 'ollama',
+        'docker_api_url': 'docker',
+    }
+    explicit_provider_choice = any(
+        item.get('name') == 'default_provider' for item in pref_data
+    )
 
     for data in pref_data:
         if data['name'] in ['vw_edt_tab_title_placeholder',
@@ -320,6 +351,16 @@ def update():
         pref = pref_module.preference(data['name'])
         # set user preferences
         pref.set(data['value'])
+
+        # Auto-select the default LLM provider when an API key/URL is
+        # configured and no provider has been selected yet.
+        if not explicit_provider_choice and \
+                data['name'] in _provider_map and data['value']:
+            ai_module = Preferences.module('ai')
+            if ai_module:
+                dp_pref = ai_module.preference('default_provider')
+                if dp_pref and not dp_pref.get():
+                    dp_pref.set(_provider_map[data['name']])
 
     return make_json_response(
         data={'data': 'Success'},

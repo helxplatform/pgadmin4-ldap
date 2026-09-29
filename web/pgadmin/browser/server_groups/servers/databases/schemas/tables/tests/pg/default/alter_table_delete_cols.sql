@@ -9,13 +9,11 @@ CREATE TABLE IF NOT EXISTS public."simple_table_with_pk$%{}[]()&*^!@""'`\/#"
     "col4_$%{}[]()&*^!@\""'`\\/#" text COLLATE pg_catalog."default",
     CONSTRAINT "simple_table_with_pk$%{}[]()&*^!@""'`\/#_pkey" PRIMARY KEY ("col1_$%{}[]()&*^!@\""""'`\\/#")
 )
-WITH (
-    OIDS = FALSE
-)
+
 TABLESPACE pg_default;
 
 ALTER TABLE IF EXISTS public."simple_table_with_pk$%{}[]()&*^!@""'`\/#"
-    OWNER to postgres;
+    OWNER to <OWNER>;
 
 COMMENT ON TABLE public."simple_table_with_pk$%{}[]()&*^!@""'`\/#"
     IS 'test comment';

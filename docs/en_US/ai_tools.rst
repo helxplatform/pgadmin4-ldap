@@ -48,15 +48,18 @@ button and select *AI*).
 Select your preferred LLM provider from the dropdown:
 
 **Anthropic**
-  Use Claude models from Anthropic. Requires an Anthropic API key.
+  Use Claude models from Anthropic, or any Anthropic-compatible API provider.
 
-  * **API Key File**: Path to a file containing your Anthropic API key (obtain from https://console.anthropic.com/).
+  * **API URL**: Custom API endpoint URL (leave empty for default: https://api.anthropic.com/v1).
+  * **API Key File**: Path to a file containing your Anthropic API key (obtain from https://console.anthropic.com/). This path refers to the filesystem where the pgAdmin server is running (e.g., inside the container if using Docker). The ``~`` prefix is expanded to the home directory of the user running the pgAdmin server process. Optional when using a custom URL with a provider that does not require authentication.
   * **Model**: Select from available Claude models (e.g., claude-sonnet-4-20250514).
 
 **OpenAI**
-  Use GPT models from OpenAI. Requires an OpenAI API key.
+  Use GPT models from OpenAI, or any OpenAI-compatible API provider (e.g.,
+  LiteLLM, LM Studio, EXO, or other local inference servers).
 
-  * **API Key File**: Path to a file containing your OpenAI API key (obtain from https://platform.openai.com/).
+  * **API URL**: Custom API endpoint URL (leave empty for default: https://api.openai.com/v1). Include the ``/v1`` path prefix if required by your provider.
+  * **API Key File**: Path to a file containing your OpenAI API key (obtain from https://platform.openai.com/). This path refers to the filesystem where the pgAdmin server is running (e.g., inside the container if using Docker). The ``~`` prefix is expanded to the home directory of the user running the pgAdmin server process. Optional when using a custom URL with a provider that does not require authentication.
   * **Model**: Select from available GPT models (e.g., gpt-4).
 
 **Ollama**
@@ -72,7 +75,43 @@ Select your preferred LLM provider from the dropdown:
   * **API URL**: The URL of the Docker Model Runner API (default: http://localhost:12434).
   * **Model**: Select from available models or enter a custom model name.
 
+.. note:: You can also use the *OpenAI* provider with a custom API URL for any
+   OpenAI-compatible endpoint, including Docker Model Runner and other local
+   inference servers.
+
 After configuring your provider, click *Save* to apply the changes.
+
+
+.. _ai_data_handling:
+
+Data Handling and Provider Selection
+************************************
+
+When a cloud LLM provider is configured, pgAdmin transmits information about
+your database to that provider's API. Depending on the feature in use, this may
+include schema definitions such as table, column, index and constraint names
+and data types; server and database configuration settings read from
+``pg_settings``; query text; and EXPLAIN plan output. The *AI Assistant* in the
+Query Tool is also able to run queries against your database, within a read-only
+transaction and limited to 1000 rows, so row data may be included where the
+assistant determines it is needed to answer a question.
+
+None of this is transmitted unless you invoke an AI feature, and none of it is
+transmitted at all when no provider has been configured, which is the default;
+when AI features have been disabled by the administrator through the
+``LLM_ENABLED`` setting; or when a locally hosted provider such as Ollama or
+Docker Model Runner is configured.
+
+Each provider processes this data under its own terms of service, privacy policy
+and legal jurisdiction, and operates its infrastructure in locations of its own
+choosing. If you work in an environment subject to data residency requirements,
+procurement policies, or sector-specific rules governing the handling of
+database metadata, review both the provider's terms and your own organisation's
+policies before enabling a cloud provider.
+
+The providers listed in pgAdmin reflect the APIs that pgAdmin is able to
+communicate with. Their inclusion is not a recommendation, and no provider is
+enabled by default.
 
 
 Security Reports

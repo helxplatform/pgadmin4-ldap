@@ -523,8 +523,7 @@ define('pgadmin.node.database', [
           i = item,
           label = data.label;
         let disconnect = function() {
-          d.label = `<span class='text-muted'>[Disconnecting...]</span> ${label}`;
-          t.setLabel(i,{label:d.label});
+          t.setLabel(i, {label: `[Disconnecting...] ${label}`, className: 'text-muted'});
           t.close(i);
           let data = d;
           getApiInstance().delete(
@@ -550,7 +549,7 @@ define('pgadmin.node.database', [
 
             } else {
               try {
-                pgAdmin.Browser.notifier.error(res.errormsg);
+                pgAdmin.Browser.notifier.errorText(res.errormsg);
               } catch (e) {
                 console.warn(e.stack || e);
               }

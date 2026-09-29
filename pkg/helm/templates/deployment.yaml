@@ -32,12 +32,12 @@ spec:
         {{- with omit .Values.commonLabels "app" }}
         {{- . | toYaml | nindent 8 }}
         {{- end }}
-      {{- if or (not (empty .Values.commonAnnotations)) (not .Values.existingSecret) .Values.preferences.enabled .Values.serverDefinitions.enabled }}
+      {{- if or (not (empty .Values.commonAnnotations)) (empty .Values.auth.existingSecret) .Values.preferences.enabled .Values.serverDefinitions.enabled }}
       annotations:
         {{- with .Values.commonAnnotations }}
         {{- . | toYaml | nindent 8 }}
         {{- end }}
-        {{- if not .Values.existingSecret }}
+        {{- if empty .Values.auth.existingSecret }}
         checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
         {{- end }}
         {{- if and .Values.config_local.enabled (empty .Values.config_local.existingSecret) }}
@@ -66,7 +66,7 @@ spec:
       {{- if .Values.persistence.enabled }}
         - name: data
           persistentVolumeClaim:
-            claimName: {{ template "pgadmin4.fullname" . }}
+            claimName: {{ .Values.persistence.existingClaim | default (include "pgadmin4.fullname" .) }}
       {{- end }}
       {{- if .Values.config_local.enabled }}
         - name: config-local
@@ -192,24 +192,9 @@ spec:
             limits:
               cpu: 50m
               memory: 64Mi
-          securityContext:
-            seLinuxOptions: {}
-            runAsUser: 1001
-            runAsGroup: 1001
-            runAsNonRoot: true
-            privileged: false
-            readOnlyRootFilesystem: true
-            allowPrivilegeEscalation: false
-            capabilities:
-              drop: ["ALL"]
-            seccompProfile:
-              type: RuntimeDefault
-            {{- if .Values.global.compatibility.appArmor.enabled }}
-            appArmorProfile:
-              type: RuntimeDefault
-            {{- end }}
-            windowsOptions:
-              hostProcess: false
+          {{- if .Values.containerSecurityContext.enabled }}
+          securityContext: {{- include "renderSecurityContext" (dict "securityContext" .Values.containerSecurityContext "context" .) | nindent 12 }}
+          {{- end }}
         - name: unset-python3-cli-net-cap
           image: {{ template "pgadmin4.image" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
@@ -226,21 +211,6 @@ spec:
             limits:
               cpu: 50m
               memory: 64Mi
-          securityContext:
-            seLinuxOptions: {}
-            runAsUser: 1001
-            runAsGroup: 1001
-            runAsNonRoot: true
-            privileged: false
-            readOnlyRootFilesystem: true
-            allowPrivilegeEscalation: false
-            capabilities:
-              drop: ["ALL"]
-            seccompProfile:
-              type: RuntimeDefault
-            {{- if .Values.global.compatibility.appArmor.enabled }}
-            appArmorProfile:
-              type: RuntimeDefault
-            {{- end }}
-            windowsOptions:
-              hostProcess: false
+          {{- if .Values.containerSecurityContext.enabled }}
+          securityContext: {{- include "renderSecurityContext" (dict "securityContext" .Values.containerSecurityContext "context" .) | nindent 12 }}
+          {{- end }}

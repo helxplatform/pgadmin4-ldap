@@ -6,13 +6,10 @@ CREATE TABLE public."simple_table_$%{}[]()&*^!@""'`\/#"
     col4 character varying(30),
     col5 numeric(20, 10),
     col6 timestamp(5) with time zone
-)
-WITH (
-    OIDS = FALSE
 );
 
 ALTER TABLE IF EXISTS public."simple_table_$%{}[]()&*^!@""'`\/#"
-    OWNER to postgres;
+    OWNER to <OWNER>;
 
 COMMENT ON TABLE public."simple_table_$%{}[]()&*^!@""'`\/#"
     IS 'test comment';

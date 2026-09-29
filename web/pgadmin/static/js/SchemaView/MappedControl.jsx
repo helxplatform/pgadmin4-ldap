@@ -384,8 +384,32 @@ export const MappedFormControl = ({
     hasError,
   };
 
+  // Pass current dependency values into controlProps so that
+  // child components (e.g., SelectRefresh) can read the live
+  // unsaved form values for dependent fields.
+  if (depVals && field.controlProps?.refreshDeps) {
+    const refreshDeps = field.controlProps.refreshDeps;
+    const depKeys = Object.keys(refreshDeps);
+    const currentDepValues = {};
+    depKeys.forEach((paramName, idx) => {
+      currentDepValues[paramName] = depVals[idx];
+    });
+    newProps.controlProps = {
+      ...newProps.controlProps,
+      currentDepValues,
+    };
+  }
+
   if (typeof (field.type) === 'function') {
-    const typeProps = evalFunc(null, field.type, state);
+    // 'state' here is the whole top-level schema data, not this field's
+    // row, since a field nested inside a collection row shares the same
+    // accessPath resolution as any other field. 'depVals' (already resolved
+    // against this field's own row via 'deps', see listenDepChanges above)
+    // is passed as a 2nd argument so a field.type() callback can access
+    // sibling fields from its own row, mirroring what field.cell() already
+    // gets via its row argument. Existing field.type() callbacks that only
+    // take a single argument are unaffected.
+    const typeProps = evalFunc(null, field.type, state, depVals);
     newProps = {
       ...newProps,
       ...typeProps,

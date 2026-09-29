@@ -14,6 +14,7 @@ from pgadmin.misc.cloud.utils import _create_server, CloudProcessDesc
 from pgadmin.misc.bgprocess.processes import BatchProcess
 from pgadmin import make_json_response
 from pgadmin.utils import PgAdminModule
+from pgadmin.utils.text_sanitize import sanitize_external_text
 from pgadmin.user_login_check import pga_login_required
 import json
 from flask import session, current_app, request
@@ -23,15 +24,6 @@ from pgacloud.utils.azure_cache import load_persistent_cache, \
     TokenCachePersistenceOptions
 import os
 
-
-from azure.mgmt.rdbms.postgresql_flexibleservers import \
-    PostgreSQLManagementClient
-from azure.identity import AzureCliCredential, DeviceCodeCredential,\
-    AuthenticationRecord
-from azure.mgmt.resource import ResourceManagementClient
-from azure.mgmt.subscription import SubscriptionClient
-from azure.mgmt.rdbms.postgresql_flexibleservers.models import \
-    NameAvailabilityRequest
 
 MODULE_NAME = 'azure'
 
@@ -57,6 +49,29 @@ blueprint = AzurePostgresqlModule(MODULE_NAME, __name__,
                                   static_url_path='/misc/cloud/azure')
 
 
+def _get_azure_from_session():
+    """Build an Azure instance from `session['azure']['state']`.
+
+    Returns None when no Azure state has been seeded yet — callers should
+    treat that as "auth not yet started." Replaces an unsafe path that
+    previously persisted the live Azure instance directly in the session.
+    """
+    azure = session.get('azure')
+    if not azure:
+        return None
+    state = azure.get('state')
+    if not state:
+        return None
+    return Azure.from_state(state)
+
+
+def _save_azure_to_session(azure_obj):
+    """Persist Azure instance state to session as a plain dict."""
+    if 'azure' not in session:
+        session['azure'] = {}
+    session['azure']['state'] = azure_obj.to_state()
+
+
 @blueprint.route('/verify_credentials/',
                  methods=['POST'], endpoint='verify_credentials')
 @pga_login_required
@@ -75,23 +90,26 @@ def verify_credentials():
 
     error = ''
     status = True
-    if 'azure_obj' not in session['azure'] or \
-        session['azure']['auth_type'] != data['secret']['auth_type'] or \
-            session['azure']['azure_tenant_id'] != tenant_id:
-        if 'azure_obj' in session['azure']:
-            del session['azure']['azure_obj']
+    cached_state = session['azure'].get('state')
+    auth_type_changed = session['azure'].get('auth_type') != \
+        data['secret']['auth_type']
+    tenant_changed = session['azure'].get('azure_tenant_id') != tenant_id
+    if cached_state is None or auth_type_changed or tenant_changed:
+        # Drop any stale state — these creds don't match the cached ones.
+        session['azure'].pop('state', None)
         azure = Azure(
             interactive_browser_credential=interactive_browser_credential,
             tenant_id=tenant_id,
             session_token=session_token)
         status, error = azure.validate_azure_credentials()
         if status:
-            session['azure']['azure_obj'] = azure
+            _save_azure_to_session(azure)
             session['azure']['auth_type'] = data['secret']['auth_type']
             session['azure']['azure_tenant_id'] = tenant_id
         if not status and 'double check your tenant name' in error:
             error = 'Authentication failed.Please double check tenant id.'
-    return make_json_response(success=status, errormsg=error)
+    return make_json_response(
+        success=status, errormsg=sanitize_external_text(error))
 
 
 @blueprint.route('/get_azure_verification_codes/',
@@ -114,17 +132,17 @@ def get_azure_verification_codes():
 def check_cluster_name_availability():
     """Check Server Name availability."""
     data = request.args
-    azure = session['azure']['azure_obj']
+    azure = _get_azure_from_session()
     server_name_available, error = \
         azure.check_cluster_name_availability(data['name'])
     if server_name_available:
         return make_json_response(success=server_name_available,
-                                  errormsg=error)
+                                  errormsg=sanitize_external_text(error))
     else:
         return make_json_response(
             status=410,
             success=0,
-            errormsg=error)
+            errormsg=sanitize_external_text(error))
 
 
 @blueprint.route('/subscriptions/',
@@ -135,7 +153,7 @@ def get_azure_subscriptions():
     List subscriptions.
     :return:
     """
-    azure = session['azure']['azure_obj']
+    azure = _get_azure_from_session()
     subscriptions_list = azure.list_subscriptions()
     return make_json_response(data=subscriptions_list)
 
@@ -149,7 +167,7 @@ def get_azure_resource_groups(subscription_id):
     """
     if not subscription_id:
         return make_json_response(data=[])
-    azure = session['azure']['azure_obj']
+    azure = _get_azure_from_session()
     resource_groups_list = azure.list_resource_groups(subscription_id)
     return make_json_response(data=resource_groups_list)
 
@@ -161,9 +179,9 @@ def get_azure_regions(subscription_id):
     """List Regions for Azure."""
     if not subscription_id:
         return make_json_response(data=[])
-    azure = session['azure']['azure_obj']
+    azure = _get_azure_from_session()
     regions_list = azure.list_regions(subscription_id)
-    session['azure']['azure_obj'] = azure
+    _save_azure_to_session(azure)
     return make_json_response(data=regions_list)
 
 
@@ -172,7 +190,7 @@ def get_azure_regions(subscription_id):
 @pga_login_required
 def is_ha_supported(region_name):
     """Check high availability support in given region."""
-    azure = session['azure']['azure_obj']
+    azure = _get_azure_from_session()
     is_zone_redundant_ha_supported = \
         azure.is_zone_redundant_ha_supported(region_name)
     return make_json_response(data={'is_zone_redundant_ha_supported':
@@ -186,9 +204,9 @@ def get_azure_availability_zones(region_name):
     """List availability zones in given region."""
     if not region_name:
         return make_json_response(data=[])
-    azure = session['azure']['azure_obj']
+    azure = _get_azure_from_session()
     availability_zones = azure.list_azure_availability_zones(region_name)
-    session['azure']['azure_obj'] = azure
+    _save_azure_to_session(azure)
     return make_json_response(data=availability_zones)
 
 
@@ -199,10 +217,10 @@ def get_azure_postgresql_server_versions(availability_zone):
     """Get azure postgres database versions."""
     if not availability_zone:
         return make_json_response(data=[])
-    azure = session['azure']['azure_obj']
+    azure = _get_azure_from_session()
     azure_postgresql_server_versions = \
         azure.list_azure_postgresql_server_versions(availability_zone)
-    session['azure']['azure_obj'] = azure
+    _save_azure_to_session(azure)
     return make_json_response(data=azure_postgresql_server_versions)
 
 
@@ -213,7 +231,7 @@ def get_azure_instance_types(availability_zone, db_version):
     """Get instance types for Azure."""
     if not db_version:
         return make_json_response(data=[])
-    azure = session['azure']['azure_obj']
+    azure = _get_azure_from_session()
     instance_types = azure.list_compute_types(availability_zone, db_version)
     return make_json_response(data=instance_types)
 
@@ -225,7 +243,7 @@ def list_azure_storage_types(availability_zone, db_version):
     """Get the storage types supported."""
     if not db_version:
         return make_json_response(data=[])
-    azure = session['azure']['azure_obj']
+    azure = _get_azure_from_session()
     storage_types = azure.list_storage_types(availability_zone, db_version)
     return make_json_response(data=storage_types)
 
@@ -236,6 +254,34 @@ def list_azure_storage_types(availability_zone, db_version):
 def clear_session():
     clear_azure_session()
     return make_json_response(success=1)
+
+
+def _azure_sdk():
+    """Defer heavy Azure SDK imports until required by user actions.
+    Repeat calls are cheap via sys.modules caching.
+    """
+    from types import SimpleNamespace
+    from azure.identity import (
+        AzureCliCredential, DeviceCodeCredential, AuthenticationRecord
+    )
+    from azure.mgmt.rdbms.postgresql_flexibleservers import (
+        PostgreSQLManagementClient
+    )
+    from azure.mgmt.rdbms.postgresql_flexibleservers.models import (
+        NameAvailabilityRequest
+    )
+    from azure.mgmt.resource import ResourceManagementClient
+    from azure.mgmt.subscription import SubscriptionClient
+
+    return SimpleNamespace(
+        AzureCliCredential=AzureCliCredential,
+        DeviceCodeCredential=DeviceCodeCredential,
+        AuthenticationRecord=AuthenticationRecord,
+        PostgreSQLManagementClient=PostgreSQLManagementClient,
+        ResourceManagementClient=ResourceManagementClient,
+        SubscriptionClient=SubscriptionClient,
+        NameAvailabilityRequest=NameAvailabilityRequest,
+    )
 
 
 class Azure:
@@ -255,6 +301,63 @@ class Azure:
         self.azure_cache_name = current_user.username \
             + str(secrets.choice(range(1, 9999))) + "_msal.cache"
         self.azure_cache_location = config.AZURE_CREDENTIAL_CACHE_DIR + '/'
+
+    def to_state(self):
+        """Serialize persistable state to a plain dict for `flask.session`.
+
+        Live Azure SDK objects (`_clients`, `_credentials`,
+        `_cli_credentials`) are intentionally NOT included — they are
+        rebuilt lazily from `authentication_record_json` (interactive auth)
+        or `AzureCliCredential()` (CLI auth) on first use.
+
+        Replaces the previous design that persisted the live Azure instance
+        directly into the session, which required a serializable-anything
+        session storage backend (an insecure-deserialization vector).
+        """
+        return {
+            'tenant_id': self._tenant_id,
+            'session_token': self._session_token,
+            'use_interactive_credential': self._use_interactive_credential,
+            'authentication_record_json': self.authentication_record_json,
+            'region': self._region,
+            'subscription_id': self.subscription_id,
+            'availability_zone': self._availability_zone,
+            'available_capabilities_list': self._available_capabilities_list,
+            'azure_cache_name': self.azure_cache_name,
+            'azure_cache_location': self.azure_cache_location,
+        }
+
+    @classmethod
+    def from_state(cls, state):
+        """Rebuild an Azure instance from a previously-serialized dict.
+
+        Bypasses `__init__` (which references `current_user.username`) so
+        this works in unit tests and in worker contexts where the session
+        is being reconstructed from a previous request's state.
+
+        SDK clients are NOT pre-populated — they're built lazily from
+        `authentication_record_json` on first credential use.
+        """
+        if not isinstance(state, dict):
+            return None
+        obj = cls.__new__(cls)
+        obj._clients = {}
+        obj._tenant_id = state.get('tenant_id')
+        obj._session_token = state.get('session_token')
+        obj._use_interactive_credential = bool(
+            state.get('use_interactive_credential', False))
+        obj.authentication_record_json = \
+            state.get('authentication_record_json')
+        obj._cli_credentials = None
+        obj._credentials = None
+        obj._region = state.get('region', 'eastus')
+        obj.subscription_id = state.get('subscription_id')
+        obj._availability_zone = state.get('availability_zone')
+        obj._available_capabilities_list = \
+            state.get('available_capabilities_list', []) or []
+        obj.azure_cache_name = state.get('azure_cache_name')
+        obj.azure_cache_location = state.get('azure_cache_location')
+        return obj
 
     ##########################################################################
     # Azure Helper functions
@@ -283,7 +386,8 @@ class Azure:
 
     def _azure_cli_auth(self):
         if self._cli_credentials is None:
-            self._cli_credentials = AzureCliCredential()
+            sdk = _azure_sdk()
+            self._cli_credentials = sdk.AzureCliCredential()
             self.list_subscriptions()
         return self._cli_credentials
 
@@ -296,8 +400,9 @@ class Azure:
         session['azure']['azure_auth_code'] = azure_auth_code
 
     def _azure_interactive_auth(self):
+        sdk = _azure_sdk()
         if self.authentication_record_json is None:
-            _interactive_credential = DeviceCodeCredential(
+            _interactive_credential = sdk.DeviceCodeCredential(
                 tenant_id=self._tenant_id,
                 timeout=180,
                 prompt_callback=self._azure_interactive_auth_prompt_callback,
@@ -308,9 +413,9 @@ class Azure:
             _auth_record = _interactive_credential.authenticate()
             self.authentication_record_json = _auth_record.serialize()
         else:
-            deserialized_auth_record = AuthenticationRecord.deserialize(
+            deserialized_auth_record = sdk.AuthenticationRecord.deserialize(
                 self.authentication_record_json)
-            _interactive_credential = DeviceCodeCredential(
+            _interactive_credential = sdk.DeviceCodeCredential(
                 tenant_id=self._tenant_id,
                 timeout=180,
                 prompt_callback=self._azure_interactive_auth_prompt_callback,
@@ -324,30 +429,43 @@ class Azure:
     def _get_azure_client(self, type):
         """ Create/cache/return an Azure client object """
         if type in self._clients:
-            return self._clients[type]
+            return self._clients[type], None
 
-        _, _credentials = self._get_azure_credentials()
+        status, _credentials = self._get_azure_credentials()
+        if not status:
+            return None, _credentials
+
+        try:
+            sdk = _azure_sdk()
+        except ImportError as e:
+            return None, str(e)
 
         if type == 'postgresql':
-            client = PostgreSQLManagementClient(_credentials,
-                                                self.subscription_id)
+            client = sdk.PostgreSQLManagementClient(_credentials,
+                                                    self.subscription_id)
         elif type == 'resource':
-            client = ResourceManagementClient(_credentials,
-                                              self.subscription_id)
+            client = sdk.ResourceManagementClient(_credentials,
+                                                  self.subscription_id)
         elif type == 'subscription':
-            client = SubscriptionClient(_credentials)
+            client = sdk.SubscriptionClient(_credentials)
 
         self._clients[type] = client
-        return self._clients[type]
+        return self._clients[type], None
 
     def check_cluster_name_availability(self, cluster_name):
         """
         Checks whether given server name is available or not
         :param cluster_name
         """
-        postgresql_client = self._get_azure_client('postgresql')
+        try:
+            sdk = _azure_sdk()
+        except ImportError as e:
+            return False, str(e)
+        postgresql_client, error = self._get_azure_client('postgresql')
+        if postgresql_client is None:
+            return False, error
         res = postgresql_client.check_name_availability.execute(
-            NameAvailabilityRequest(
+            sdk.NameAvailabilityRequest(
                 name=cluster_name,
                 type='Microsoft.DBforPostgreSQL/flexibleServers'))
         res = res.__dict__
@@ -358,9 +476,12 @@ class Azure:
         List subscriptions
         :return:
         """
-        subscription_client = self._get_azure_client('subscription')
-        sub_list = subscription_client.subscriptions.list()
         subscriptions_list = []
+        subscription_client, error = self._get_azure_client('subscription')
+        if subscription_client is None:
+            current_app.logger.error(error)
+            return subscriptions_list
+        sub_list = subscription_client.subscriptions.list()
         for group in list(sub_list):
             subscriptions_list.append(
                 {'subscription_id': group.subscription_id,
@@ -374,9 +495,12 @@ class Azure:
         :return:
         """
         self.subscription_id = subscription_id
-        resource_client = self._get_azure_client('resource')
-        group_list = resource_client.resource_groups.list()
         resource_groups_list = []
+        resource_client, error = self._get_azure_client('resource')
+        if resource_client is None:
+            current_app.logger.error(error)
+            return resource_groups_list
+        group_list = resource_client.resource_groups.list()
         for group in list(group_list):
             resource_groups_list.append(
                 {'label': group.name,
@@ -391,10 +515,13 @@ class Azure:
         :return:
         """
         self.subscription_id = subscription_id
-        subscription_client = self._get_azure_client('subscription')
+        locations_list = []
+        subscription_client, error = self._get_azure_client('subscription')
+        if subscription_client is None:
+            current_app.logger.error(error)
+            return locations_list
         locations = subscription_client.subscriptions.list_locations(
             subscription_id=self.subscription_id)
-        locations_list = []
         for location in locations:
             locations_list.append(
                 {'label': location.display_name, 'value': location.name})
@@ -408,8 +535,10 @@ class Azure:
         else:
             self._available_capabilities_list = \
                 self._get_available_capabilities_list(region)
-            return self._available_capabilities_list[0][
-                'zone_redundant_ha_supported']
+            if self._available_capabilities_list:
+                return self._available_capabilities_list[0][
+                    'zone_redundant_ha_supported']
+            return False
 
     def list_azure_availability_zones(self, region):
         """
@@ -512,7 +641,10 @@ class Azure:
         :param region:
         :return: azure capabilities object
         """
-        postgresql_client = self._get_azure_client('postgresql')
+        postgresql_client, error = self._get_azure_client('postgresql')
+        if postgresql_client is None:
+            current_app.logger.error(error)
+            return []
         return postgresql_client.location_based_capabilities.execute(
             location_name=region)
 
@@ -689,7 +821,7 @@ def deploy_on_azure(data):
 
         env = dict()
 
-        azure = session['azure']['azure_obj']
+        azure = _get_azure_from_session()
         env['AZURE_SUBSCRIPTION_ID'] = azure.subscription_id
         env['AUTH_TYPE'] = data['secret']['auth_type']
         env['AZURE_CRED_CACHE_NAME'] = azure.azure_cache_name
@@ -719,7 +851,7 @@ def deploy_on_azure(data):
         current_app.logger.exception(e)
         return False, None, str(e)
     finally:
-        del session['azure']['azure_obj']
+        session['azure'].pop('state', None)
 
 
 def clear_azure_session(pid=None):

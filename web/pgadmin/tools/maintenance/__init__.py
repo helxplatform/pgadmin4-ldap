@@ -10,6 +10,7 @@
 """A blueprint module implementing the maintenance tool for vacuum"""
 
 import json
+import re
 
 from flask import Response, render_template, request, current_app
 from flask_babel import gettext as _
@@ -148,6 +149,49 @@ def get_index_name(data):
     return index_name
 
 
+# Values for these options are concatenated into the rendered SQL command.
+# They MUST be allow-listed here — anything not matching is rejected before
+# rendering. reindex_tablespace is escaped via qtIdent in the template, so it
+# is not validated here beyond a type check.
+_INDEX_CLEANUP_ALLOWED = {'AUTO', 'ON', 'OFF'}
+_BUFFER_USAGE_LIMIT_RE = re.compile(r'^\d+\s*(kB|MB|GB|TB)$', re.IGNORECASE)
+_VACUUM_PARALLEL_MAX = 1024
+
+
+def validate_maintenance_data(data):
+    """
+    Validate user-supplied option values that are concatenated into the
+    maintenance SQL template. Returns an error message on failure, or None
+    if all values are acceptable.
+    """
+    index_cleanup = data.get('vacuum_index_cleanup')
+    if index_cleanup:
+        if not isinstance(index_cleanup, str) or \
+                index_cleanup not in _INDEX_CLEANUP_ALLOWED:
+            return _("Invalid value for INDEX_CLEANUP option.")
+
+    parallel = data.get('vacuum_parallel')
+    if parallel not in (None, ''):
+        try:
+            n = int(parallel)
+        except (TypeError, ValueError):
+            return _("Invalid value for PARALLEL option.")
+        if n < 0 or n > _VACUUM_PARALLEL_MAX:
+            return _("Invalid value for PARALLEL option.")
+
+    buffer_limit = data.get('buffer_usage_limit')
+    if buffer_limit:
+        if not isinstance(buffer_limit, str) or \
+                not _BUFFER_USAGE_LIMIT_RE.match(buffer_limit.strip()):
+            return _("Invalid value for BUFFER_USAGE_LIMIT option.")
+
+    tablespace = data.get('reindex_tablespace')
+    if tablespace is not None and not isinstance(tablespace, str):
+        return _("Invalid value for TABLESPACE option.")
+
+    return None
+
+
 @blueprint.route(
     '/job/<int:sid>/<int:did>', methods=['POST'], endpoint='create_job'
 )
@@ -168,6 +212,18 @@ def create_maintenance_job(sid, did):
         data = json.loads(request.form['data'])
     else:
         data = json.loads(request.data)
+
+    validation_error = validate_maintenance_data(data)
+    if validation_error is not None:
+        return bad_request(errormsg=validation_error)
+
+    # A target database is mandatory. Reject an empty/missing value up front:
+    # otherwise PGDATABASE is left unset and libpq falls back down its chain to
+    # a database named after the login role, silently running maintenance on
+    # the wrong database instead of failing safely.
+    if not data.get('database'):
+        return bad_request(
+            errormsg=_("Database parameter is required."))
 
     index_name = get_index_name(data)
 
@@ -207,23 +263,29 @@ def create_maintenance_job(sid, did):
         index_name=index_name
     )
 
+    # The target database is passed via the PGDATABASE environment variable
+    # below, not as a --dbname argument -- a user-controlled value containing
+    # "=" is expanded by libpq into a connection string (connection and
+    # credential redirection).
     args = [
         '--host',
         manager.local_bind_host if manager.use_ssh_tunnel else server.host,
         '--port',
         str(manager.local_bind_port) if manager.use_ssh_tunnel
         else str(server.port),
-        '--username', server.username, '--dbname',
-        data['database'],
+        '--username', server.username,
         '--command', query
     ]
 
     try:
+        env = {}
+        if data.get('database'):
+            env['PGDATABASE'] = data['database']
         p = BatchProcess(
             desc=Message(server.id, data, query),
             cmd=utility, args=args, manager_obj=manager
         )
-        p.set_env_variables(server)
+        p.set_env_variables(server, env=env)
         p.start()
         jid = p.id
     except Exception as e:
@@ -244,6 +306,7 @@ def create_maintenance_job(sid, did):
 @blueprint.route(
     '/utility_exists/<int:sid>', endpoint='utility_exists'
 )
+@permissions_required(AllPermissionTypes.tools_maintenance)
 @pga_login_required
 def check_utility_exists(sid):
     """
