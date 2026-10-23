@@ -67,7 +67,7 @@ RUN apt-get update && apt-get install -y \
     libpng-dev \
     python3-dev && \
     python3 -m venv /venv && \
-    /venv/bin/pip install --upgrade pip -r requirements.txt && \
+    /venv/bin/pip install --upgrade "pip>=26.2.2" -r requirements.txt && \
     rm -rf /var/lib/apt/lists/*
 
 #########################################################################
@@ -200,6 +200,15 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
     vim \
     less \
     postgresql-common
+
+# eMudhra CA compromise (DSA-6572-1): require the bookworm-security
+# ca-certificates that distrusts "emSign ECC Root CA - G3", so a stale cached
+# layer can never ship the compromised root.
+RUN apt-get update && \
+    apt-get install -y --only-upgrade ca-certificates && \
+    dpkg --compare-versions "$(dpkg-query -W -f='${Version}' ca-certificates)" ge 20250419~deb12u2 && \
+    update-ca-certificates --fresh && \
+    ! ls /etc/ssl/certs /usr/share/ca-certificates/mozilla | grep -q "emSign_ECC_Root_CA_-_G3"
 
 COPY --from=env-builder /venv /venv
 
