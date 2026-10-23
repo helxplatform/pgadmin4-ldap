@@ -209,12 +209,16 @@ RUN apt-get update && \
     apt-get install -y --only-upgrade ca-certificates && \
     dpkg --compare-versions "$(dpkg-query -W -f='${Version}' ca-certificates)" ge 20250419~deb12u2 && \
     update-ca-certificates --fresh && \
-    ! ls /etc/ssl/certs /usr/share/ca-certificates/mozilla | grep -q "emSign_ECC_Root_CA_-_G3"
+    ! ls /etc/ssl/certs /usr/share/ca-certificates/mozilla | grep -q "emSign_ECC_Root_CA_-_G3" && \
+    # Debian's python3-pip already resolves certifi.where() to the system
+    # bundle; point its stale vendored cacert.pem there too.
+    ln -sf /etc/ssl/certs/ca-certificates.crt /usr/lib/python3/dist-packages/pip/_vendor/certifi/cacert.pem
 
 COPY --from=env-builder /venv /venv
 
 RUN /venv/bin/pip install psycopg[binary,pool] gunicorn==23.0.0 && \
-    rm -rf /var/lib/apt/lists/*
+    rm -rf /var/lib/apt/lists/* && \
+    ! find / -xdev -name cacert.pem -exec grep -l "emSign ECC Root CA - G3" {} + | grep .
 
 RUN mkdir -p /run/pgadmin /var/lib/pgadmin && \
     chgrp -R 0 /home /pgadmin4 /venv && \
