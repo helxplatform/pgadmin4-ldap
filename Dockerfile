@@ -26,8 +26,9 @@ RUN apt-get update && apt-get install -y \
     make \
     nasm \
     zlib1g-dev && \
-    curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
+    curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
     apt-get install -y nodejs && \
+    node -e 'const [a,b,c]=process.versions.node.split(".").map(Number); process.exit(a===22 && (b>23 || (b===23 && c>=4)) ? 0 : 1)' && \
     corepack enable && \
     corepack prepare yarn@3.6.4 --activate && \
     rm -rf /var/lib/apt/lists/*
