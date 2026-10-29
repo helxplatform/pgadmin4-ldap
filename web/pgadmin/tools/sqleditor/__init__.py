@@ -428,14 +428,14 @@ def panel(trans_id):
         return render_template(
             "sqleditor/index.html",
             title=underscore_escape(params['title']),
-            params=json.dumps(params),
+            params=params,
         )
     else:
         params['error'] = 'The server was not found.'
         return render_template(
             "sqleditor/index.html",
             title=None,
-            params=json.dumps(params))
+            params=params)
 
 
 @blueprint.route(

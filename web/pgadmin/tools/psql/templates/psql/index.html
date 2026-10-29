@@ -42,7 +42,7 @@ try {
         function() {
             require(['sources/generated/psql_tool'], function(module) {
             window.pgAdmin.Tools.Psql.loadComponent(
-                document.getElementById('psql-container'),{{ params|safe }});
+                document.getElementById('psql-container'),{{ params|tojson }});
         }, function() {
             console.log(arguments);
         });

@@ -46,3 +46,7 @@ MASTER_PASSWORD_REQUIRED = False
 
 # User ID (email address) to use for the default user in desktop mode.
 DESKTOP_USER="user@domain.com"
+
+# Password exec commands run arbitrary shell commands when connecting, and a
+# server definition carrying one can be imported from a shared directory.
+ENABLE_SERVER_PASS_EXEC_CMD = False
