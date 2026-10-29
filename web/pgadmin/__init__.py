@@ -995,5 +995,6 @@ def create_app(app_name=None):
     ##########################################################################
     # All done!
     ##########################################################################
-    socketio.init_app(app, cors_allowed_origins="*")
+    socketio.init_app(
+        app, cors_allowed_origins=config.SOCKETIO_CORS_ALLOWED_ORIGINS)
     return app
