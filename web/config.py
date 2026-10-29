@@ -1049,7 +1049,7 @@ SERVER_HEARTBEAT_TIMEOUT = 30  # In seconds
 # ENABLE_SERVER_PASS_EXEC_CMD is used to enable/disable Password exec command
 # field in server properties. This is used to specify a shell command to be
 # executed to retrieve a password to be used for server authentication.
-# This setting is applicable only for server mode.
+# This setting applies in both server and desktop mode.
 #############################################################################
 ENABLE_SERVER_PASS_EXEC_CMD = False
 
