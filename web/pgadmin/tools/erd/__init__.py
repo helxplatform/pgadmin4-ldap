@@ -571,14 +571,14 @@ def panel(trans_id):
         return render_template(
             "erd/index.html",
             connectionTitle=underscore_unescape(params['connectionTitle']),
-            params=json.dumps(params),
+            params=params,
         )
     else:
         params['error'] = 'Server did not find.'
         return render_template(
             "erd/index.html",
             title=None,
-            params=json.dumps(params))
+            params=params)
 
 
 @blueprint.route(

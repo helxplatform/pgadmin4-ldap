@@ -111,12 +111,12 @@ def panel(trans_id):
             params['role'] = underscore_escape(data['role'])
         set_env_variables(is_win=_platform == 'win32')
         return render_template("psql/index.html",
-                               params=json.dumps(params))
+                               params=params)
     else:
         params['error'] = 'The server was not found.'
         return render_template(
             "psql/index.html",
-            params=json.dumps(params))
+            params=params)
 
 
 def set_env_variables(is_win=False):

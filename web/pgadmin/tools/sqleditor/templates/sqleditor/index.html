@@ -33,7 +33,7 @@
             function() {
                 require(['sources/generated/sqleditor'], function(module) {
                 window.pgAdmin.Tools.SQLEditor.loadComponent(
-                    document.getElementById('sqleditor-container'), {{ params|safe }});
+                    document.getElementById('sqleditor-container'), {{ params|tojson }});
 
             }, function() {
                 console.log(arguments);
