@@ -360,7 +360,7 @@ export class PartitionsSchema extends BaseUISchema {
       group: 'Partition', mode: ['edit'],
       type: (state)=>({
         type: 'note',
-        text: state.sub_partition_scheme,
+        text: _.escape(state.sub_partition_scheme || ''),
       }),
       visible: function(state) {
         return obj.isNew(state) && !isEmptyString(state.sub_partition_scheme);

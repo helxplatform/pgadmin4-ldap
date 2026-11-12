@@ -565,7 +565,7 @@ export default class ServerSchema extends BaseUISchema {
         id: 'passexec_cmd', label: gettext('Password exec command'), type: 'text',
         group: gettext('Advanced'), controlProps: {maxLength: null},
         mode: ['properties', 'edit', 'create'],
-        disabled: pgAdmin.server_mode == 'True' && pgAdmin.enable_server_passexec_cmd == 'False',
+        disabled: pgAdmin.enable_server_passexec_cmd == 'False',
         helpMessage: gettext('The server hostname, port, and username can be passed as variables by using the placeholders %HOSTNAME%, %PORT%, and %USERNAME%, which will be replaced with the corresponding server connection information.')
       },
       {

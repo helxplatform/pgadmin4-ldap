@@ -156,7 +156,7 @@ def panel(trans_id, editor_title):
         _=gettext,
         trans_id=trans_id,
         editor_title=editor_title,
-        params=json.dumps(params)
+        params=params
     )
 
 

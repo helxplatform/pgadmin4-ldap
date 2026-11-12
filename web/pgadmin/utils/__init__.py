@@ -555,10 +555,7 @@ def dump_database_servers(output_file, selected_servers,
             add_value(attr_dict, "PostConnectionSQL",
                       server.post_connection_sql)
 
-            # if desktop mode or server mode with
-            # ENABLE_SERVER_PASS_EXEC_CMD flag is True
-            if not current_app.config['SERVER_MODE'] or \
-                    current_app.config['ENABLE_SERVER_PASS_EXEC_CMD']:
+            if current_app.config['ENABLE_SERVER_PASS_EXEC_CMD']:
                 add_value(attr_dict, "PasswordExecCommand",
                           server.passexec_cmd)
                 add_value(attr_dict, "PasswordExecExpiration",
@@ -834,10 +831,7 @@ def load_database_servers(input_file, selected_servers,
 
             new_server.post_connection_sql = obj.get("PostConnectionSQL", None)
 
-            # if desktop mode or server mode with
-            # ENABLE_SERVER_PASS_EXEC_CMD flag is True
-            if not current_app.config['SERVER_MODE'] or \
-                    current_app.config['ENABLE_SERVER_PASS_EXEC_CMD']:
+            if current_app.config['ENABLE_SERVER_PASS_EXEC_CMD']:
                 new_server.passexec_cmd = obj.get("PasswordExecCommand", None)
                 new_server.passexec_expiration = obj.get(
                     "PasswordExecExpiration", None)

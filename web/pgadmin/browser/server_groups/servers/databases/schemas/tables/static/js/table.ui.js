@@ -1013,7 +1013,7 @@ export default class TableSchema extends BaseUISchema {
       group: 'partition', mode: ['edit'],
       type: (state)=>({
         type: 'note',
-        text: state.partition_scheme || '',
+        text: _.escape(state.partition_scheme || ''),
       }),
       min_version: 100000,
     },

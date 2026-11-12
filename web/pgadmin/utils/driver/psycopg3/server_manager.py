@@ -86,7 +86,8 @@ class ServerManager(object):
         self.passexec = \
             PasswordExec(server.passexec_cmd, server.host, server.port,
                          server.username, server.passexec_expiration) \
-            if server.passexec_cmd else None
+            if server.passexec_cmd and config.ENABLE_SERVER_PASS_EXEC_CMD \
+            else None
         self.service = server.service
 
         if config.SUPPORT_SSH_TUNNEL:

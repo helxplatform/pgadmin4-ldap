@@ -1675,7 +1675,8 @@ class ServerNode(PGChildNodeView):
             conn_passwd = getattr(conn, 'password', None)
             if conn_passwd is None and not server.save_password and \
                     passfile_param is None and \
-                    server.passexec_cmd is None and \
+                    (server.passexec_cmd is None or
+                     not config.ENABLE_SERVER_PASS_EXEC_CMD) and \
                     server.service is None:
                 prompt_password = True
             elif passfile_param and passfile_param != '' and \

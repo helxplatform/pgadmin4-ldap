@@ -41,9 +41,32 @@ class TestPasswordExecServiceOnly(BaseTestGenerator):
                       return_value=fake_driver), \
                 patch('pgadmin.utils.passexec.subprocess.run',
                       return_value=fake_proc) as mock_run, \
-                patch('pgadmin.utils.passexec.config.SERVER_MODE', False):
+                patch('pgadmin.utils.passexec.config.SERVER_MODE', False), \
+                patch('pgadmin.utils.passexec.config.'
+                      'ENABLE_SERVER_PASS_EXEC_CMD', True):
             password = pexec.get()
 
         self.assertEqual(password, 'secret')
         self.assertEqual(mock_run.call_args[0][0], 'echo ::')
         fake_driver.qtIdent.assert_not_called()
+
+
+class TestPasswordExecDisabledInDesktopMode(BaseTestGenerator):
+    """With ENABLE_SERVER_PASS_EXEC_CMD off, desktop mode must not run the
+    command either."""
+
+    def setUp(self):
+        pass
+
+    def runTest(self):
+        pexec = PasswordExec('echo secret', 'localhost', 5432, 'postgres')
+
+        with self.app.app_context(), \
+                patch('pgadmin.utils.passexec.subprocess.run') as mock_run, \
+                patch('pgadmin.utils.passexec.config.SERVER_MODE', False), \
+                patch('pgadmin.utils.passexec.config.'
+                      'ENABLE_SERVER_PASS_EXEC_CMD', False):
+            with self.assertRaises(NotImplementedError):
+                pexec.get()
+
+        mock_run.assert_not_called()

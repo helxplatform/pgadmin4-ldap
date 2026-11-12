@@ -1049,9 +1049,20 @@ SERVER_HEARTBEAT_TIMEOUT = 30  # In seconds
 # ENABLE_SERVER_PASS_EXEC_CMD is used to enable/disable Password exec command
 # field in server properties. This is used to specify a shell command to be
 # executed to retrieve a password to be used for server authentication.
-# This setting is applicable only for server mode.
+# This setting applies in both server and desktop mode.
 #############################################################################
 ENABLE_SERVER_PASS_EXEC_CMD = False
+
+#############################################################################
+# SOCKETIO_CORS_ALLOWED_ORIGINS lists the origins allowed to open Socket.IO
+# connections (used by the PSQL tool, ERD and Schema Diff). None accepts only
+# the origin pgAdmin is served from, derived from the Host and
+# X-Forwarded-Proto/X-Forwarded-Host headers. A list of origins such as
+# ['https://pgadmin.example.com'] can be given if a proxy rewrites those
+# headers. '*' accepts any origin, which lets other sites open these
+# connections, including the PSQL terminal.
+#############################################################################
+SOCKETIO_CORS_ALLOWED_ORIGINS = None
 
 #############################################################################
 # Maximum number of Tags allowed on a server node
