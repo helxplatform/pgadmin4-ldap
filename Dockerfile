@@ -99,34 +99,6 @@ RUN rm -rf /pgadmin4/docs/en_US/_build && \
 
 
 #########################################################################
-# Create additional builders to get all of the PostgreSQL utilities
-#########################################################################
-
-FROM postgres:14 AS pg14-builder
-FROM postgres:15 AS pg15-builder
-FROM postgres:16 AS pg16-builder
-
-FROM debian:bookworm AS tool-builder
-
-# Copy the PG binaries
-
-COPY --from=pg14-builder /usr/bin/pg_dump /usr/local/pgsql/pgsql-14/
-COPY --from=pg14-builder /usr/bin/pg_dumpall /usr/local/pgsql/pgsql-14/
-COPY --from=pg14-builder /usr/bin/pg_restore /usr/local/pgsql/pgsql-14/
-COPY --from=pg14-builder /usr/bin/psql /usr/local/pgsql/pgsql-14/
-
-COPY --from=pg15-builder /usr/bin/pg_dump /usr/local/pgsql/pgsql-15/
-COPY --from=pg15-builder /usr/bin/pg_dumpall /usr/local/pgsql/pgsql-15/
-COPY --from=pg15-builder /usr/bin/pg_restore /usr/local/pgsql/pgsql-15/
-COPY --from=pg15-builder /usr/bin/psql /usr/local/pgsql/pgsql-15/
-
-COPY --from=pg16-builder /usr/bin/pg_dump /usr/local/pgsql/pgsql-16/
-COPY --from=pg16-builder /usr/bin/pg_dumpall /usr/local/pgsql/pgsql-16/
-COPY --from=pg16-builder /usr/bin/pg_restore /usr/local/pgsql/pgsql-16/
-COPY --from=pg16-builder /usr/bin/psql /usr/local/pgsql/pgsql-16/
-
-
-#########################################################################
 # Final Container
 #########################################################################
 
@@ -152,20 +124,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc --fail https://www.postgresql.org/media/keys/ACCC4CF8.asc && \
     echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt bookworm-pgdg main" > /etc/apt/sources.list.d/pgdg.list && \
     apt-get update && \
-    apt-get install -y --no-install-recommends postgresql-client-15 && \
+    apt-get install -y --no-install-recommends \
+        postgresql-client-14 postgresql-client-15 postgresql-client-16 \
+        postgresql-client-17 postgresql-client-18 && \
+    for v in 14 15 16 17 18; do ln -s /usr/lib/postgresql/$v/bin /usr/local/pgsql-$v; done && \
     rm -rf /var/lib/apt/lists/*
 
 
-# Copy in the tools
-COPY --from=tool-builder /usr/local/pgsql /usr/local/
-
-# Copy in psql libs:
-RUN set -eux; \
-    find /usr/local/pgsql -type f -executable | while read bin; do \
-        ldd "$bin" | awk '{print $3}' | grep '^/' | xargs -r cp -v -t /usr/lib/; \
-    done && \
-    ldconfig && \
-    ln -s /usr/lib/libpq.so.5 /usr/lib/libpq.so
 
 # Copy in the startup scripts
 COPY pkg/docker/run_pgadmin.py /pgadmin4/
